@@ -178,10 +178,4 @@ benches/
 Rust **1.88** (edition 2021). Stable only — no nightly features required.
 
 ## License
-
-Licensed under either of
-
-- [MIT License](LICENSE-MIT)
-- [Apache License, Version 2.0](LICENSE-APACHE)
-
-at your option.
+- [Apache License, Version 2.0](LICENSE)
