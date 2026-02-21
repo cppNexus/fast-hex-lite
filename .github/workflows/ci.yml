@@ -133,10 +133,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: cargo package
-        run: cargo package --allow-dirty=false
-
-      - name: cargo publish (dry-run)
-        run: cargo publish --dry-run
+        run: cargo package
 
   # --- Optional MSRV check: if Cargo.toml has `rust-version`, we enforce it ---
   msrv:

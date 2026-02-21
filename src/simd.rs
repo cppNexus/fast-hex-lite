@@ -15,7 +15,7 @@ use crate::{decode::decode_scalar, Error};
 
 #[cfg(target_arch = "x86_64")]
 use core::arch::x86_64::{
-    __m128i, _mm_add_epi8, _mm_and_si128, _mm_cmplt_epi8, _mm_cmpgt_epi8, _mm_loadu_si128,
+    __m128i, _mm_add_epi8, _mm_and_si128, _mm_cmpgt_epi8, _mm_cmplt_epi8, _mm_loadu_si128,
     _mm_movemask_epi8, _mm_or_si128, _mm_packus_epi16, _mm_set1_epi16, _mm_set1_epi8,
     _mm_setzero_si128, _mm_slli_epi16, _mm_srli_epi16, _mm_storel_epi64,
 };
