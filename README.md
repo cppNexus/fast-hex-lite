@@ -15,7 +15,10 @@ Ultra-fast hex encoding/decoding in Rust with zero allocations and `#![no_std]` 
 
 [![Crates.io](https://img.shields.io/crates/v/fast-hex-lite.svg)](https://crates.io/crates/fast-hex-lite)
 [![Docs.rs](https://img.shields.io/docsrs/fast-hex-lite)](https://docs.rs/fast-hex-lite)
-[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](#license)
+[![Downloads](https://img.shields.io/crates/d/fast-hex-lite.svg)](https://crates.io/crates/fast-hex-lite)
+[![MSRV](https://img.shields.io/badge/MSRV-1.88-success)](https://crates.io/crates/fast-hex-lite)
+[![no_std](https://img.shields.io/badge/no__std-yes-brightgreen)](https://crates.io/crates/fast-hex-lite)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![CI](https://github.com/cppNexus/fast-hex-lite/actions/workflows/ci.yml/badge.svg)](https://github.com/cppNexus/fast-hex-lite/actions/workflows/ci.yml)
 
 Designed for performance-critical systems such as cryptography,
