@@ -51,6 +51,10 @@ mod simd;
 pub use decode::{decode_in_place, decode_to_array, decode_to_slice, decoded_len};
 pub use encode::{encode_to_slice, encoded_len};
 
+// `encode_to_string` requires allocation (String), so it is only available with `std`.
+#[cfg(feature = "std")]
+pub use encode::encode_to_string;
+
 /// Errors that can occur during hex encoding or decoding.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
