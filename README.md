@@ -14,7 +14,7 @@ Ultra-fast hex encoding/decoding in Rust with zero allocations and `#![no_std]` 
 - Stable Rust only (no nightly features)
 
 [![Crates.io](https://img.shields.io/crates/v/fast-hex-lite.svg)](https://crates.io/crates/fast-hex-lite)
-[![Docs.rs](https://img.shields.io/docsrs/fast-hex-lite/badge.svg)](https://docs.rs/fast-hex-lite)
+[![Docs.rs](https://img.shields.io/docsrs/fast-hex-lite)](https://docs.rs/fast-hex-lite)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](#license)
 [![CI](https://github.com/cppNexus/fast-hex-lite/actions/workflows/ci.yml/badge.svg)](https://github.com/cppNexus/fast-hex-lite/actions/workflows/ci.yml)
 
