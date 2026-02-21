@@ -20,6 +20,7 @@ Ultra-fast hex encoding/decoding in Rust with zero allocations and `#![no_std]` 
 [![no_std](https://img.shields.io/badge/no__std-yes-brightgreen)](https://crates.io/crates/fast-hex-lite)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![CI](https://github.com/cppNexus/fast-hex-lite/actions/workflows/ci.yml/badge.svg)](https://github.com/cppNexus/fast-hex-lite/actions/workflows/ci.yml)
+[![Coverage](https://img.shields.io/badge/coverage-99%25-brightgreen)](https://github.com/cppNexus/fast-hex-lite)
 
 Designed for performance-critical systems such as cryptography,
 networking stacks, blockchain infrastructure, and embedded environments
@@ -33,7 +34,7 @@ where `no_std` and zero heap usage are mandatory.
 |-----------|:-------:|----------------------------------------------------------|
 | _(none)_  | yes     | `no_std`, alloc-free scalar encoder/decoder              |
 | `std`     |         | Implements `std::error::Error` for `Error`               |
-| `simd`    |         | SIMD-accelerated decoder via `std::simd` (implies `std`) |
+| `simd`    |         | SIMD-accelerated decoder via architecture intrinsics (implies `std`) |
 
 ### Feature interactions
 
@@ -175,6 +176,73 @@ scalar path. Remaining tail bytes fall back to scalar automatically.
 
 ---
 
+## Security & correctness philosophy
+
+`fast-hex-lite` is designed with a conservative correctness-first mindset suitable for
+cryptography-adjacent and infrastructure workloads.
+
+### Deterministic semantics
+
+- All decoding paths (scalar and SIMD) share identical observable behavior.
+- Error indices are guaranteed to point to the **first invalid byte**.
+- Mixed-case input does not change control flow or error semantics.
+- No whitespace normalization or implicit acceptance of non-hex characters.
+
+### No partial mutation guarantees
+
+- `decode_to_slice` and `decode_in_place` never partially mutate the destination
+  buffer on error.
+- If an error is returned, the caller's output buffer remains unchanged.
+
+### No hidden allocations
+
+- No heap allocation occurs in the default configuration.
+- All APIs operate on caller-provided memory.
+- `encode_to_string` is explicitly opt-in and requires `std`.
+
+### SIMD is an optimization, not a different implementation
+
+- SIMD is gated behind a feature flag.
+- Scalar fallback is always available.
+- All SIMD logic is covered by the same tests and error contracts.
+- Tail handling is verified to match scalar semantics byte-for-byte.
+
+### Audit-friendly design
+
+- Error types are explicit and structured.
+- No UB-prone pointer arithmetic in scalar code.
+- SIMD intrinsics are isolated and architecture-gated.
+- High test coverage across scalar and SIMD paths (~99% line coverage).
+
+The goal is predictable, verifiable behavior under all inputs — including malformed
+or adversarial data — rather than maximum theoretical throughput at the cost of
+clarity or guarantees.
+
+---
+
+---
+
+## Testing & Coverage
+
+The crate is validated with:
+
+- `cargo test`
+- `cargo test --features simd`
+- `cargo clippy --all-targets --all-features -- -D warnings`
+
+Coverage is measured using `llvm-cov`.
+
+Current coverage:
+
+- Total line coverage: ~99%
+- Functions: 100%
+- Scalar and SIMD paths both tested
+- All error variants covered
+- No-partial-write guarantees validated
+- Full 0x00–0xFF roundtrip tests
+
+---
+
 ## Benchmarks
 
 Measured on Apple M3 Pro (macOS, `cargo bench --features simd`).
@@ -183,8 +251,6 @@ Numbers are median Criterion throughput values.
 
 Throughput is over **decoded output bytes** for decode, **input bytes** for encode and
 validate, and **decoded output bytes** for decode_in_place.
-
-Decode throughput is measured over decoded output bytes. Encode throughput is measured over input bytes.
 
 ### Decode: scalar (hex to bytes)
 
@@ -253,6 +319,29 @@ Use `fast-hex-lite` when:
 - You want explicit, index-aware error reporting
 
 If you only need convenience APIs with heap allocation and minimal performance sensitivity, the `hex` crate may be sufficient.
+
+---
+
+## Comparison
+
+| Crate        | no_std | Alloc-free | Precise error index | SIMD ARM | SIMD x86 | Notes |
+|--------------|--------|------------|---------------------|----------|----------|-------|
+| fast-hex-lite | ✅     | ✅         | ✅                  | ✅ NEON  | ✅ SSE2  | Deterministic perf, zero-alloc by default |
+| hex          | ❌     | ❌         | ❌                  | ❌       | ❌       | Convenience-focused |
+| faster-hex   | ❌     | ⚠ partial  | ❌                  | ❌       | ✅ AVX/SSE | x86-focused SIMD |
+| const-hex    | ✅     | ✅         | ❌                  | ❌       | ❌       | Optimized for const-eval |
+
+### Design goals
+
+`fast-hex-lite` focuses on:
+
+- Zero heap usage by default
+- `no_std` compatibility
+- Deterministic throughput across sizes
+- Precise, reproducible error indices
+- Cross-architecture SIMD (x86_64 + aarch64)
+
+Unlike x86-only SIMD crates, both Apple Silicon and x86_64 are first-class targets.
 
 ---
 

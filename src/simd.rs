@@ -231,10 +231,7 @@ unsafe fn validate_chunk16_neon(src16: &[u8], hex_base: usize) -> Result<(), Err
                 });
             }
         }
-        return Err(Error::InvalidByte {
-            index: hex_base,
-            byte: src16[0],
-        });
+        unreachable!("NEON validate invariant violated: min_lane != 0xFF but all lanes == 0xFF");
     }
 
     Ok(())
@@ -282,3 +279,6 @@ unsafe fn decode_chunk16_neon(src16: &[u8], dst8: &mut [u8]) {
     let packed_bytes: uint8x8_t = vmovn_u16(packed_words);
     vst1_u8(dst8.as_mut_ptr(), packed_bytes);
 }
+#[cfg(all(test, feature = "simd"))]
+#[path = "simd/tests.rs"]
+mod tests;
