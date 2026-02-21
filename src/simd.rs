@@ -14,7 +14,11 @@
 use crate::{decode::decode_scalar, Error};
 
 #[cfg(target_arch = "x86_64")]
-use core::arch::x86_64::*;
+use core::arch::x86_64::{
+    __m128i, _mm_add_epi8, _mm_and_si128, _mm_cmplt_epi8, _mm_cmpgt_epi8, _mm_loadu_si128,
+    _mm_movemask_epi8, _mm_or_si128, _mm_packus_epi16, _mm_set1_epi16, _mm_set1_epi8,
+    _mm_setzero_si128, _mm_slli_epi16, _mm_srli_epi16, _mm_storel_epi64,
+};
 
 #[cfg(target_arch = "aarch64")]
 use core::arch::aarch64::{
@@ -129,26 +133,24 @@ fn validate_hex_scalar(src_hex: &[u8], hex_base: usize) -> Result<(), Error> {
 unsafe fn validate_chunk16_sse2(src16: &[u8], hex_base: usize) -> Result<(), Error> {
     debug_assert_eq!(src16.len(), 16);
 
-    let v = _mm_loadu_si128(src16.as_ptr() as *const __m128i);
+    #[allow(clippy::cast_ptr_alignment)]
+    let v = _mm_loadu_si128(src16.as_ptr().cast::<__m128i>());
 
-    // is_digit: '0'..'9'
-    let ge_0 = _mm_cmpgt_epi8(v, _mm_set1_epi8((b'0' - 1) as i8));
-    let le_9 = _mm_cmplt_epi8(v, _mm_set1_epi8((b'9' + 1) as i8));
+    let ge_0 = _mm_cmpgt_epi8(v, _mm_set1_epi8((b'0' - 1).cast_signed()));
+    let le_9 = _mm_cmplt_epi8(v, _mm_set1_epi8((b'9' + 1).cast_signed()));
     let is_digit = _mm_and_si128(ge_0, le_9);
 
-    // lower = v | 0x20 (ASCII case fold)
-    let lower = _mm_or_si128(v, _mm_set1_epi8(0x20u8 as i8));
+    let lower = _mm_or_si128(v, _mm_set1_epi8(0x20u8.cast_signed()));
 
-    // is_alpha: 'a'..'f' after case fold
-    let ge_a = _mm_cmpgt_epi8(lower, _mm_set1_epi8((b'a' - 1) as i8));
-    let le_f = _mm_cmplt_epi8(lower, _mm_set1_epi8((b'f' + 1) as i8));
+    let ge_a = _mm_cmpgt_epi8(lower, _mm_set1_epi8((b'a' - 1).cast_signed()));
+    let le_f = _mm_cmplt_epi8(lower, _mm_set1_epi8((b'f' + 1).cast_signed()));
     let is_alpha = _mm_and_si128(ge_a, le_f);
 
     let valid = _mm_or_si128(is_digit, is_alpha);
     let mask = _mm_movemask_epi8(valid);
 
     if mask != -1 {
-        let bad_lane = (!(mask as u32)).trailing_zeros() as usize;
+        let bad_lane = (!mask.cast_unsigned()).trailing_zeros() as usize;
         return Err(Error::InvalidByte {
             index: hex_base + bad_lane,
             byte: src16[bad_lane],
@@ -169,23 +171,18 @@ unsafe fn decode_chunk16_sse2(src16: &[u8], dst8: &mut [u8]) {
     // - All pointer casts are to properly aligned stack memory or unaligned loads
     //   via *_loadu_* intrinsics which support unaligned access.
 
-    let v = _mm_loadu_si128(src16.as_ptr() as *const __m128i);
-
-    // is_digit: '0'..'9'
-    let ge_0 = _mm_cmpgt_epi8(v, _mm_set1_epi8((b'0' - 1) as i8)); // v > '0'-1  => v >= '0'
-    let le_9 = _mm_cmplt_epi8(v, _mm_set1_epi8((b'9' + 1) as i8)); // v < '9'+1  => v <= '9'
-    let is_digit = _mm_and_si128(ge_0, le_9);
+    #[allow(clippy::cast_ptr_alignment)]
+    let v = _mm_loadu_si128(src16.as_ptr().cast::<__m128i>());
 
     // lower = v | 0x20 (ASCII case fold)
-    let lower = _mm_or_si128(v, _mm_set1_epi8(0x20u8 as i8));
+    let lower = _mm_or_si128(v, _mm_set1_epi8(0x20u8.cast_signed()));
 
-    // is_alpha: 'a'..'f' after case fold
-    let ge_a = _mm_cmpgt_epi8(lower, _mm_set1_epi8((b'a' - 1) as i8));
-    let le_f = _mm_cmplt_epi8(lower, _mm_set1_epi8((b'f' + 1) as i8));
+    let ge_a = _mm_cmpgt_epi8(lower, _mm_set1_epi8((b'a' - 1).cast_signed()));
+    let le_f = _mm_cmplt_epi8(lower, _mm_set1_epi8((b'f' + 1).cast_signed()));
     let is_alpha = _mm_and_si128(ge_a, le_f);
 
     // nibble = (v & 0x0F) + (is_alpha ? 9 : 0)
-    let low_nibble = _mm_and_si128(v, _mm_set1_epi8(0x0Fu8 as i8));
+    let low_nibble = _mm_and_si128(v, _mm_set1_epi8(0x0Fu8.cast_signed()));
     // add = is_alpha & 9
     let add = _mm_and_si128(is_alpha, _mm_set1_epi8(9i8));
     let nibbles = _mm_add_epi8(low_nibble, add);
@@ -196,11 +193,12 @@ unsafe fn decode_chunk16_sse2(src16: &[u8], dst8: &mut [u8]) {
     // Treat as 8 little-endian u16 words: (n0 | (n1<<8)), (n2 | (n3<<8)), ...
     // Then compute ((low_byte<<4) | high_byte) per word and pack low bytes.
     let w = nibbles;
-    let low = _mm_and_si128(w, _mm_set1_epi16(0x00FFu16 as i16));
+    let low = _mm_and_si128(w, _mm_set1_epi16(0x00FFu16.cast_signed()));
     let high = _mm_srli_epi16(w, 8);
     let packed_words = _mm_or_si128(_mm_slli_epi16(low, 4), high);
     let packed_bytes = _mm_packus_epi16(packed_words, _mm_setzero_si128());
-    _mm_storel_epi64(dst8.as_mut_ptr() as *mut __m128i, packed_bytes);
+    #[allow(clippy::cast_ptr_alignment)]
+    _mm_storel_epi64(dst8.as_mut_ptr().cast::<__m128i>(), packed_bytes);
 }
 
 #[cfg(target_arch = "aarch64")]

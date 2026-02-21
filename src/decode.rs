@@ -12,7 +12,7 @@ use crate::Error;
 /// ```
 #[inline]
 pub fn decoded_len(hex_len: usize) -> Result<usize, Error> {
-    if hex_len % 2 != 0 {
+    if !hex_len.is_multiple_of(2) {
         Err(Error::OddLength)
     } else {
         Ok(hex_len / 2)

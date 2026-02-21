@@ -40,12 +40,12 @@ pub fn encode_to_slice(src: &[u8], dst_hex: &mut [u8], lowercase: bool) -> Resul
 
     Ok(out_len)
 }
+
 /// Encode into a newly allocated `String`.
 ///
 /// Available only with the `std` feature.
 #[cfg(feature = "std")]
 #[inline]
-#[allow(dead_code)]
 pub fn encode_to_string(src: &[u8], lowercase: bool) -> String {
     let mut out = vec![0u8; encoded_len(src.len())];
     // infallible because buffer is pre-sized
