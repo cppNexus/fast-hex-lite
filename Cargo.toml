@@ -3,16 +3,20 @@ name = "fast-hex-lite"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.88"
-authors = ["fast-hex-lite contributors"]
-description = "Ultra-fast hex encoding/decoding with zero allocations and no_std support"
-license = "Apache-2.0"
+authors = ["CppNexus cppnexus@proton.me"]
+description = "High-performance hex encoding and decoding with zero allocations, no_std support and SIMD acceleration"
 repository = "https://github.com/cppNexus/fast-hex-lite"
 homepage = "https://github.com/cppNexus/fast-hex-lite"
 documentation = "https://docs.rs/fast-hex-lite"
 readme = "README.md"
 keywords = ["hex", "encoding", "decoding", "no_std", "simd"]
 categories = ["encoding", "no-std", "algorithms"]
-exclude = ["/.github"]
+include = [
+    "src/**",
+    "README.md",
+    "LICENSE*",
+    "Cargo.toml",
+]
 
 [features]
 default = []
