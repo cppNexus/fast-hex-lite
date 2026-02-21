@@ -1,0 +1,176 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # Make our crate strict (warnings are errors). Rust generally does not emit warnings for dependencies.
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  # --- Build & test (no simd) on the 3 major OSes ---
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: cargo check (all targets)
+        run: cargo check --all-targets
+
+      - name: cargo test (all targets)
+        run: cargo test --all-targets --verbose
+
+  # --- SIMD feature: validate it builds & tests on Apple Silicon runner (macOS) ---
+  test_simd:
+    name: test (macos, --features simd)
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: cargo check (all targets)
+        run: cargo check --all-targets --features simd
+
+      - name: cargo test (all targets)
+        run: cargo test --all-targets --features simd --verbose
+
+  # --- Clippy (deny warnings) ---
+  clippy:
+    name: clippy (deny warnings)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust (stable + clippy)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: cargo clippy (all targets, all features)
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+  # --- rustfmt ---
+  fmt:
+    name: rustfmt (check)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust (stable + rustfmt)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: cargo fmt
+        run: cargo fmt --all -- --check
+
+  # --- Docs must be warning-free too (common crates.io expectation) ---
+  doc:
+    name: doc (deny warnings)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build docs (no deps)
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+        run: cargo doc --no-deps --all-features
+
+  # --- crates.io packaging sanity: ensure the crate can be packaged & published (dry-run) ---
+  package:
+    name: package / publish --dry-run
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: cargo package
+        run: cargo package --allow-dirty=false
+
+      - name: cargo publish (dry-run)
+        run: cargo publish --dry-run
+
+  # --- Optional MSRV check: if Cargo.toml has `rust-version`, we enforce it ---
+  msrv:
+    name: MSRV check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Detect rust-version
+        id: msrv
+        shell: bash
+        run: |
+          set -euo pipefail
+          msrv=$(grep -E '^rust-version\s*=\s*"' Cargo.toml | head -n1 | sed -E 's/^rust-version\s*=\s*"([^"]+)".*/\1/')
+          if [[ -z "${msrv}" ]]; then
+            echo "rust-version not set in Cargo.toml; skipping MSRV enforcement"
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "MSRV=${msrv}"
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+            echo "toolchain=${msrv}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install Rust (MSRV)
+        if: steps.msrv.outputs.enabled == 'true'
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.msrv.outputs.toolchain }}
+
+      - name: Cache cargo
+        if: steps.msrv.outputs.enabled == 'true'
+        uses: Swatinem/rust-cache@v2
+
+      - name: cargo check (MSRV)
+        if: steps.msrv.outputs.enabled == 'true'
+        run: cargo check --all-targets
