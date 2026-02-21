@@ -9,6 +9,7 @@ repository = "https://github.com/cppNexus/fast-hex-lite"
 homepage = "https://github.com/cppNexus/fast-hex-lite"
 documentation = "https://docs.rs/fast-hex-lite"
 readme = "README.md"
+license = "Apache-2.0"
 keywords = ["hex", "encoding", "decoding", "no_std", "simd"]
 categories = ["encoding", "no-std", "algorithms"]
 include = [
