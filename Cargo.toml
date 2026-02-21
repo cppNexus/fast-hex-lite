@@ -1,0 +1,40 @@
+[package]
+name = "fast-hex-lite"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+authors = ["fast-hex-lite contributors"]
+description = "Ultra-fast hex encoding/decoding with zero allocations and no_std support"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/example/fast-hex-lite"
+homepage = "https://github.com/example/fast-hex-lite"
+documentation = "https://docs.rs/fast-hex-lite"
+readme = "README.md"
+keywords = ["hex", "encoding", "decoding", "no_std", "simd"]
+categories = ["encoding", "no-std", "algorithms"]
+exclude = ["/benches", "/.github"]
+
+[features]
+default = []
+std = []
+simd = ["std"]
+
+[dependencies]
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+hex = "0.4"
+
+[[bench]]
+name = "bench"
+harness = false
+
+[profile.bench]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
