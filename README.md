@@ -2,6 +2,17 @@
 
 Ultra-fast hex encoding/decoding in Rust with zero allocations and `#![no_std]` support.
 
+---
+
+## Why fast-hex-lite?
+
+- Zero allocations (except optional `encode_to_string`)
+- `no_std` by default
+- Precise error reporting (byte index)
+- Deterministic performance across input sizes
+- Optional SIMD acceleration
+- Stable Rust only (no nightly features)
+
 [![Crates.io](https://img.shields.io/crates/v/fast-hex-lite.svg)](https://crates.io/crates/fast-hex-lite)
 [![Docs.rs](https://img.shields.io/docsrs/fast-hex-lite/badge.svg)](https://docs.rs/fast-hex-lite)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](#license)
@@ -20,6 +31,13 @@ where `no_std` and zero heap usage are mandatory.
 | _(none)_  | yes     | `no_std`, alloc-free scalar encoder/decoder              |
 | `std`     |         | Implements `std::error::Error` for `Error`               |
 | `simd`    |         | SIMD-accelerated decoder via `std::simd` (implies `std`) |
+
+### Feature interactions
+
+- `simd` implies `std`
+- Scalar path is always available
+- `encode_to_string` requires `std`
+- `no_std` builds exclude any allocation-based helpers
 
 ---
 
@@ -142,7 +160,15 @@ The SIMD path processes 32 hex bytes per iteration using `Simd<u8, 32>`. It is f
 transparent: the public API, error types, and error index semantics are identical to the
 scalar path. Remaining tail bytes fall back to scalar automatically.
 
-Requirements: Rust 1.88+, stable (no nightly features used).
+---
+
+## Safety
+
+- Scalar path contains no `unsafe`
+- SIMD paths use architecture intrinsics behind feature gates
+- No panics on valid input
+- All bounds are checked
+- Error indices are deterministic and reproducible
 
 ---
 
@@ -154,6 +180,8 @@ Numbers are median Criterion throughput values.
 
 Throughput is over **decoded output bytes** for decode, **input bytes** for encode and
 validate, and **decoded output bytes** for decode_in_place.
+
+Decode throughput is measured over decoded output bytes. Encode throughput is measured over input bytes.
 
 ### Decode: scalar (hex to bytes)
 
@@ -209,6 +237,29 @@ caller-provided stack arrays or static buffers.
 ```toml
 fast-hex-lite = { version = "0.1", default-features = false }
 ```
+
+---
+
+## When to use
+
+Use `fast-hex-lite` when:
+
+- You need deterministic performance
+- You run in `no_std`
+- You process large volumes of hex (RPC, blockchain, hashing)
+- You want explicit, index-aware error reporting
+
+If you only need convenience APIs with heap allocation and minimal performance sensitivity, the `hex` crate may be sufficient.
+
+---
+
+## Architecture support
+
+| Architecture | Scalar | SIMD |
+|--------------|--------|------|
+| x86_64       | ✅     | SSE2 |
+| aarch64      | ✅     | NEON |
+| others       | ✅     | ❌   |
 
 ---
 
