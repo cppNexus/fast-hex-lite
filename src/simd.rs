@@ -1,9 +1,9 @@
-//! SIMD-accelerated hex decoder (feature `simd`) — STABLE (core::arch).
+//! SIMD-accelerated hex decoder (feature `simd`) — STABLE (`core::arch`)
 //!
 //! Goals (in order):
 //! - **Correctness** (no partial writes on error)
 //! - **Stability** (stable Rust, no `portable_simd`)
-//! - **Universality** (x86_64 + aarch64 fast paths, scalar fallback)
+//! - **Universality** (`x86_64` + aarch64 fast paths, scalar fallback)
 //! - **Speed**
 //!
 //! Strategy:
@@ -11,23 +11,24 @@
 //! - Store nibbles to a small stack array and pack pairs into bytes
 //! - Scalar tail for the remainder
 
-#![cfg(feature = "simd")]
-
 use crate::{decode::decode_scalar, Error};
 
 #[cfg(target_arch = "x86_64")]
 use core::arch::x86_64::*;
 
 #[cfg(target_arch = "aarch64")]
-use core::arch::aarch64::*;
+use core::arch::aarch64::{
+    uint16x8_t, uint8x16_t, uint8x8_t, vaddq_u8, vandq_u16, vandq_u8, vbslq_u8, vcgeq_u8, vcleq_u8,
+    vdupq_n_u16, vdupq_n_u8, vld1q_u8, vminvq_u8, vmovn_u16, vorrq_u16, vorrq_u8,
+    vreinterpretq_u16_u8, vshlq_n_u16, vshrq_n_u16, vst1_u8, vst1q_u8, vsubq_u8,
+};
+
+const CHUNK_HEX: usize = 16;
+const CHUNK_OUT: usize = 8;
 
 pub(crate) fn decode_to_slice_simd(src_hex: &[u8], dst: &mut [u8]) -> Result<usize, Error> {
     let out_len = dst.len();
     debug_assert_eq!(src_hex.len(), out_len * 2);
-
-    // 16 hex chars -> 8 bytes output
-    const CHUNK_HEX: usize = 16;
-    const CHUNK_OUT: usize = 8;
 
     let iters = out_len / CHUNK_OUT;
     let tail_hex_start = iters * CHUNK_HEX;
@@ -108,7 +109,7 @@ pub(crate) fn decode_to_slice_simd(src_hex: &[u8], dst: &mut [u8]) -> Result<usi
 
 #[inline]
 fn is_hex_ascii(b: u8) -> bool {
-    matches!(b, b'0'..=b'9' | b'a'..=b'f' | b'A'..=b'F')
+    b.is_ascii_hexdigit()
 }
 
 fn validate_hex_scalar(src_hex: &[u8], hex_base: usize) -> Result<(), Error> {

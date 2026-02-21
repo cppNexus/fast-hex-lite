@@ -86,8 +86,8 @@ pub fn decode_in_place(buf: &mut [u8]) -> Result<usize, Error> {
     for i in 0..out_len {
         let hi = buf[2 * i];
         let lo = buf[2 * i + 1];
-        // Validation above guarantees this is a valid entry.
-        buf[i] = decode_pair(hi, lo) as u8;
+        // Validation above guarantees `decode_pair` returns 0x00..=0xFF.
+        buf[i] = u8::try_from(decode_pair(hi, lo)).unwrap();
     }
 
     Ok(out_len)
@@ -95,7 +95,7 @@ pub fn decode_in_place(buf: &mut [u8]) -> Result<usize, Error> {
 
 // ── Scalar decoder ─────────────────────────────────────────────────────────
 
-#[inline(always)]
+#[inline]
 pub(crate) fn decode_scalar(src_hex: &[u8], dst: &mut [u8]) -> Result<usize, Error> {
     // `src_hex` is already even-length checked by the caller.
     // `dst` is already sized-checked by the caller.
@@ -104,7 +104,7 @@ pub(crate) fn decode_scalar(src_hex: &[u8], dst: &mut [u8]) -> Result<usize, Err
     // Hot loop: single 16-bit table lookup per output byte.
     // Use a tight index-based loop so LLVM can eliminate bounds checks.
     let mut j = 0usize;
-    for i in 0..out_len {
+    for out in dst.iter_mut().take(out_len) {
         let hi = src_hex[j];
         let lo = src_hex[j + 1];
 
@@ -121,7 +121,8 @@ pub(crate) fn decode_scalar(src_hex: &[u8], dst: &mut [u8]) -> Result<usize, Err
             });
         }
 
-        dst[i] = v as u8;
+        // `decode_pair` returns 0x00..=0xFF for valid pairs.
+        *out = u8::try_from(v).unwrap();
         j += 2;
     }
 
@@ -132,10 +133,14 @@ pub(crate) fn decode_scalar(src_hex: &[u8], dst: &mut [u8]) -> Result<usize, Err
 /// Returns `None` for non-hex bytes.
 ///
 /// Fast table lookup.
-#[inline(always)]
+#[inline]
 pub(crate) fn unhex_byte(b: u8) -> Option<u8> {
     let v = UNHEX_TABLE[b as usize];
-    if v == 0xFF { None } else { Some(v) }
+    if v == 0xFF {
+        None
+    } else {
+        Some(v)
+    }
 }
 
 // 256-entry nibble table (0..=15) or 0xFF for invalid.
@@ -147,9 +152,9 @@ const UNHEX_TABLE: [u8; 256] = make_unhex_table();
 //
 // This lets the scalar decoder process 2 input bytes per iteration with a
 // single table lookup.
-const HEXPAIR_TABLE: [u16; 65536] = make_hexpair_table();
+static HEXPAIR_TABLE: [u16; 65536] = make_hexpair_table();
 
-#[inline(always)]
+#[inline]
 fn decode_pair(hi: u8, lo: u8) -> u16 {
     // Index is the two ASCII bytes.
     let idx = ((hi as usize) << 8) | (lo as usize);
@@ -158,10 +163,11 @@ fn decode_pair(hi: u8, lo: u8) -> u16 {
 
 const fn make_unhex_table() -> [u8; 256] {
     let mut t = [0xFFu8; 256];
-    let mut i = 0u16;
-    while i < 256 {
-        let b = i as u8;
-        t[i as usize] = if b >= b'0' && b <= b'9' {
+
+    // Iterate as `u8` to avoid any potentially-truncating casts.
+    let mut b = 0u8;
+    loop {
+        t[b as usize] = if b >= b'0' && b <= b'9' {
             b - b'0'
         } else if b >= b'a' && b <= b'f' {
             b - b'a' + 10
@@ -170,11 +176,17 @@ const fn make_unhex_table() -> [u8; 256] {
         } else {
             0xFF
         };
-        i += 1;
+
+        if b == u8::MAX {
+            break;
+        }
+        b = b.wrapping_add(1);
     }
+
     t
 }
 
+#[allow(clippy::large_stack_arrays)]
 const fn make_hexpair_table() -> [u16; 65536] {
     let mut t = [0x0100u16; 65536];
     let unhex = make_unhex_table();
@@ -202,8 +214,8 @@ const fn make_hexpair_table() -> [u16; 65536] {
 #[cfg(test)]
 mod tests {
     extern crate std;
-    use std::prelude::v1::*;
     use super::*;
+    use std::prelude::v1::*;
 
     #[test]
     fn test_decoded_len() {
@@ -239,7 +251,7 @@ mod tests {
         for (hex, expected) in cases {
             let mut buf = std::vec![0u8; expected.len()];
             let n = decode_to_slice(hex, &mut buf).unwrap();
-            assert_eq!(&buf[..n], *expected, "hex: {:?}", hex);
+            assert_eq!(&buf[..n], *expected, "hex: {hex:?}");
         }
     }
 
@@ -247,7 +259,13 @@ mod tests {
     fn test_invalid_byte_at_zero() {
         let mut buf = [0u8; 1];
         let err = decode_to_slice(b"gz", &mut buf).unwrap_err();
-        assert_eq!(err, Error::InvalidByte { index: 0, byte: b'g' });
+        assert_eq!(
+            err,
+            Error::InvalidByte {
+                index: 0,
+                byte: b'g'
+            }
+        );
     }
 
     #[test]
@@ -255,20 +273,35 @@ mod tests {
         let mut buf = [0u8; 3];
         let err = decode_to_slice(b"aabbXX", &mut buf).unwrap_err();
         // 'X' is at index 4
-        assert_eq!(err, Error::InvalidByte { index: 4, byte: b'X' });
+        assert_eq!(
+            err,
+            Error::InvalidByte {
+                index: 4,
+                byte: b'X'
+            }
+        );
     }
 
     #[test]
     fn test_invalid_byte_at_last() {
         let mut buf = [0u8; 2];
         let err = decode_to_slice(b"aabX", &mut buf).unwrap_err();
-        assert_eq!(err, Error::InvalidByte { index: 3, byte: b'X' });
+        assert_eq!(
+            err,
+            Error::InvalidByte {
+                index: 3,
+                byte: b'X'
+            }
+        );
     }
 
     #[test]
     fn test_odd_length() {
         let mut buf = [0u8; 2];
-        assert_eq!(decode_to_slice(b"abc", &mut buf).unwrap_err(), Error::OddLength);
+        assert_eq!(
+            decode_to_slice(b"abc", &mut buf).unwrap_err(),
+            Error::OddLength
+        );
     }
 
     #[test]
@@ -305,7 +338,13 @@ mod tests {
         let mut buf = *b"deadXXef";
         let err = decode_in_place(&mut buf).unwrap_err();
         // buf must not have been partially modified
-        assert_eq!(err, Error::InvalidByte { index: 4, byte: b'X' });
+        assert_eq!(
+            err,
+            Error::InvalidByte {
+                index: 4,
+                byte: b'X'
+            }
+        );
         // buffer must be fully unmodified on error
         assert_eq!(&buf, b"deadXXef");
     }

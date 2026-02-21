@@ -1,7 +1,7 @@
 use crate::Error;
 
 /// Returns the required output length (in bytes) for encoding `n` bytes to hex.
-#[inline(always)]
+#[inline]
 pub const fn encoded_len(n: usize) -> usize {
     n * 2
 }
@@ -14,11 +14,7 @@ pub const fn encoded_len(n: usize) -> usize {
 ///
 /// Returns [`Error::OutputTooSmall`] if `dst_hex` is not large enough.
 #[inline]
-pub fn encode_to_slice(
-    src: &[u8],
-    dst_hex: &mut [u8],
-    lowercase: bool,
-) -> Result<usize, Error> {
+pub fn encode_to_slice(src: &[u8], dst_hex: &mut [u8], lowercase: bool) -> Result<usize, Error> {
     let out_len = encoded_len(src.len());
     if dst_hex.len() < out_len {
         return Err(Error::OutputTooSmall);
@@ -33,7 +29,11 @@ pub fn encode_to_slice(
     // SAFETY-FREE hot loop:
     // - dst_hex length already validated
     // - we write exactly 2 bytes per input byte
-    for (byte, out_pair) in src.iter().copied().zip(dst_hex[..out_len].chunks_exact_mut(2)) {
+    for (byte, out_pair) in src
+        .iter()
+        .copied()
+        .zip(dst_hex[..out_len].chunks_exact_mut(2))
+    {
         out_pair[0] = alphabet[(byte >> 4) as usize];
         out_pair[1] = alphabet[(byte & 0x0f) as usize];
     }

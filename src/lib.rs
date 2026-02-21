@@ -78,11 +78,7 @@ impl core::fmt::Display for Error {
                     f,
                     "invalid hex byte 0x{:02x} ('{}') at index {}",
                     b,
-                    if b.is_ascii_graphic() {
-                        b as char
-                    } else {
-                        '?'
-                    },
+                    if b.is_ascii_graphic() { b as char } else { '?' },
                     index
                 )
             }

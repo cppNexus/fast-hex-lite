@@ -36,7 +36,13 @@ fn bytes_to_hex_mixed_from_lower(lower_hex: &[u8]) -> Vec<u8> {
     lower_hex
         .iter()
         .enumerate()
-        .map(|(i, &c)| if i % 2 == 0 { c.to_ascii_uppercase() } else { c })
+        .map(|(i, &c)| {
+            if i % 2 == 0 {
+                c.to_ascii_uppercase()
+            } else {
+                c
+            }
+        })
         .collect()
 }
 
@@ -114,7 +120,7 @@ fn batch_size_for_n(n: usize) -> BatchSize {
 
 #[inline]
 fn is_hex_byte(b: u8) -> bool {
-    matches!(b, b'0'..=b'9' | b'a'..=b'f' | b'A'..=b'F')
+    b.is_ascii_hexdigit()
 }
 
 fn validate_hex_ascii(hex: &[u8]) -> bool {
@@ -129,7 +135,10 @@ fn validate_hex_ascii(hex: &[u8]) -> bool {
 fn debug_assert_valid_hex(hex: &[u8]) {
     // Bench data must be valid hex. If this ever triggers, the generator is wrong or the buffer
     // is being reused after in-place decode.
-    debug_assert!(validate_hex_ascii(hex), "bench input is not valid ASCII hex");
+    debug_assert!(
+        validate_hex_ascii(hex),
+        "bench input is not valid ASCII hex"
+    );
 }
 
 // ── Decode benchmarks ─────────────────────────────────────────────────────
@@ -162,36 +171,21 @@ fn bench_decode(c: &mut Criterion) {
                 group.throughput(Throughput::Bytes(n as u64));
 
                 // fast-hex-lite (scalar/simd)
-                group.bench_with_input(
-                    BenchmarkId::new("fast-hex-lite", n),
-                    &hex,
-                    |b, hex_in| {
-                        b.iter(|| {
-                            let written = fast_hex_lite::decode_to_slice(
-                                black_box(hex_in),
-                                &mut dst,
-                            )
-                            .unwrap();
-                            black_box(written);
-                        })
-                    },
-                );
+                group.bench_with_input(BenchmarkId::new("fast-hex-lite", n), &hex, |b, hex_in| {
+                    b.iter(|| {
+                        let written =
+                            fast_hex_lite::decode_to_slice(black_box(hex_in), &mut dst).unwrap();
+                        black_box(written);
+                    })
+                });
 
                 // hex crate (no per-iter allocation)
-                group.bench_with_input(
-                    BenchmarkId::new("hex-crate", n),
-                    &hex,
-                    |b, hex_in| {
-                        b.iter(|| {
-                            let written = hex::decode_to_slice(
-                                black_box(hex_in.as_slice()),
-                                &mut dst,
-                            )
-                            .unwrap();
-                            black_box(written);
-                        })
-                    },
-                );
+                group.bench_with_input(BenchmarkId::new("hex-crate", n), &hex, |b, hex_in| {
+                    b.iter(|| {
+                        hex::decode_to_slice(black_box(hex_in.as_slice()), &mut dst).unwrap();
+                        black_box(&dst[..]);
+                    })
+                });
             }
 
             group.finish();
@@ -224,16 +218,12 @@ fn bench_validate_only(c: &mut Criterion) {
                 // Throughput base for validate-only: **input hex bytes** (we only read/validate the hex buffer).
                 group.throughput(Throughput::Bytes(hex.len() as u64));
 
-                group.bench_with_input(
-                    BenchmarkId::new("validate", n),
-                    &hex,
-                    |b, hex_in| {
-                        b.iter(|| {
-                            let ok = validate_hex_ascii(black_box(hex_in));
-                            black_box(ok);
-                        })
-                    },
-                );
+                group.bench_with_input(BenchmarkId::new("validate", n), &hex, |b, hex_in| {
+                    b.iter(|| {
+                        let ok = validate_hex_ascii(black_box(hex_in));
+                        black_box(ok);
+                    })
+                });
             }
 
             group.finish();
@@ -261,21 +251,13 @@ fn bench_encode(c: &mut Criterion) {
                 // Throughput base for encode: **input bytes**.
                 group.throughput(Throughput::Bytes(n as u64));
 
-                group.bench_with_input(
-                    BenchmarkId::new("fast-hex-lite", n),
-                    &src,
-                    |b, s| {
-                        b.iter(|| {
-                            let written = fast_hex_lite::encode_to_slice(
-                                black_box(s),
-                                &mut dst,
-                                true,
-                            )
-                            .unwrap();
-                            black_box(written);
-                        })
-                    },
-                );
+                group.bench_with_input(BenchmarkId::new("fast-hex-lite", n), &src, |b, s| {
+                    b.iter(|| {
+                        let written =
+                            fast_hex_lite::encode_to_slice(black_box(s), &mut dst, true).unwrap();
+                        black_box(written);
+                    })
+                });
 
                 group.bench_with_input(BenchmarkId::new("hex-crate", n), &src, |b, s| {
                     b.iter(|| {
@@ -303,21 +285,13 @@ fn bench_encode(c: &mut Criterion) {
 
                 group.throughput(Throughput::Bytes(n as u64));
 
-                group.bench_with_input(
-                    BenchmarkId::new("fast-hex-lite", n),
-                    &src,
-                    |b, s| {
-                        b.iter(|| {
-                            let written = fast_hex_lite::encode_to_slice(
-                                black_box(s),
-                                &mut dst,
-                                false,
-                            )
-                            .unwrap();
-                            black_box(written);
-                        })
-                    },
-                );
+                group.bench_with_input(BenchmarkId::new("fast-hex-lite", n), &src, |b, s| {
+                    b.iter(|| {
+                        let written =
+                            fast_hex_lite::encode_to_slice(black_box(s), &mut dst, false).unwrap();
+                        black_box(written);
+                    })
+                });
             }
 
             group.finish();
@@ -349,26 +323,28 @@ fn bench_decode_in_place(c: &mut Criterion) {
             // Throughput base for decode_in_place: **decoded output bytes**.
             group.throughput(Throughput::Bytes(n as u64));
 
-            group.bench_with_input(
-                BenchmarkId::new("fast-hex-lite", n),
-                &hex,
-                |b, hex_in| {
-                    let bs = batch_size_for_n(n);
-                    b.iter_batched(
-                        || hex_in.clone(),
-                        |mut buf| {
-                            let written = fast_hex_lite::decode_in_place(black_box(&mut buf)).unwrap();
-                            black_box(&buf[..written]);
-                        },
-                        bs,
-                    )
-                },
-            );
+            group.bench_with_input(BenchmarkId::new("fast-hex-lite", n), &hex, |b, hex_in| {
+                let bs = batch_size_for_n(n);
+                b.iter_batched(
+                    || hex_in.clone(),
+                    |mut buf| {
+                        let written = fast_hex_lite::decode_in_place(black_box(&mut buf)).unwrap();
+                        black_box(&buf[..written]);
+                    },
+                    bs,
+                )
+            });
         }
 
         group.finish();
     }
 }
 
-criterion_group!(benches, bench_decode, bench_validate_only, bench_encode, bench_decode_in_place);
+criterion_group!(
+    benches,
+    bench_decode,
+    bench_validate_only,
+    bench_encode,
+    bench_decode_in_place
+);
 criterion_main!(benches);
