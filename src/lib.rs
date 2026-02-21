@@ -1,18 +1,17 @@
-//! # fast-hex-lite
+//! Fast, allocation-free hex encoding/decoding.
 //!
-//! Ultra-fast hex encoding/decoding with **zero allocations** and `#![no_std]` support.
+//! - `no_std` by default (scalar path)
+//! - Optional `std` support
+//! - Optional `simd` accelerated decode/validate on supported targets
 //!
-//! ## Features
+//! ## API
 //!
-//! | Feature | Description |
-//! |---------|-------------|
-//! | _(default)_ | `no_std` scalar decoder + encoder |
-//! | `std` | Enables `std::error::Error` impl on [`Error`] |
-//! | `simd` | SIMD-accelerated decoder (implies `std`; requires Rust 1.88+) |
+//! - Decode: [`decode_to_slice`], [`decode_to_array`], [`decode_in_place`]
+//! - Encode: [`encode_to_slice`]
 //!
-//! ## Quick start
+//! ## Examples
 //!
-//! ### Decode hex → bytes
+//! Decode hex → bytes:
 //!
 //! ```rust
 //! use fast_hex_lite::decode_to_slice;
@@ -23,17 +22,7 @@
 //! assert_eq!(&buf[..n], &[0xde, 0xad, 0xbe, 0xef]);
 //! ```
 //!
-//! ### Decode in-place
-//!
-//! ```rust
-//! use fast_hex_lite::decode_in_place;
-//!
-//! let mut buf = *b"deadbeef";
-//! let n = decode_in_place(&mut buf).unwrap();
-//! assert_eq!(&buf[..n], &[0xde, 0xad, 0xbe, 0xef]);
-//! ```
-//!
-//! ### Encode bytes → hex
+//! Encode bytes → hex (lowercase):
 //!
 //! ```rust
 //! use fast_hex_lite::encode_to_slice;
@@ -45,7 +34,13 @@
 //! ```
 
 #![cfg_attr(not(feature = "std"), no_std)]
-#![warn(missing_docs, clippy::all)]
+#![warn(missing_docs, clippy::all, clippy::pedantic)]
+#![allow(
+    clippy::module_name_repetitions,
+    clippy::missing_errors_doc,
+    clippy::missing_panics_doc,
+    clippy::must_use_candidate
+)]
 
 mod decode;
 mod encode;
@@ -78,12 +73,13 @@ impl core::fmt::Display for Error {
             Error::OddLength => f.write_str("hex string has odd length"),
             Error::OutputTooSmall => f.write_str("output buffer is too small"),
             Error::InvalidByte { index, byte } => {
+                let b = *byte;
                 write!(
                     f,
                     "invalid hex byte 0x{:02x} ('{}') at index {}",
-                    byte,
-                    if byte.is_ascii_graphic() {
-                        *byte as char
+                    b,
+                    if b.is_ascii_graphic() {
+                        b as char
                     } else {
                         '?'
                     },

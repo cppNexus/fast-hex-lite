@@ -25,6 +25,7 @@ pub fn decoded_len(hex_len: usize) -> Result<usize, Error> {
 /// (`0-9`, `a-f`, `A-F`). `dst` must be at least `src_hex.len() / 2` bytes.
 ///
 /// Returns the number of bytes written.
+#[inline]
 pub fn decode_to_slice(src_hex: &[u8], dst: &mut [u8]) -> Result<usize, Error> {
     let out_len = decoded_len(src_hex.len())?;
     if dst.len() < out_len {
@@ -57,55 +58,71 @@ pub fn decode_to_array<const N: usize>(src_hex: &[u8]) -> Result<[u8; N], Error>
 /// decoding, the first `buf.len() / 2` bytes hold the result.
 ///
 /// Returns the number of bytes written.
+#[inline]
 pub fn decode_in_place(buf: &mut [u8]) -> Result<usize, Error> {
     let out_len = decoded_len(buf.len())?;
-    // Validate first (cheap scan) so we never partially modify buf on error.
-    for i in 0..buf.len() {
-        let b = buf[i];
-        if unhex_byte(b).is_none() {
-            return Err(Error::InvalidByte { index: i, byte: b });
-        }
-    }
-    // Now decode; safe because we validated every byte above.
-    // Use indices instead of chunks_exact() so we can write into the front of `buf`.
+
+    // Pass 1: validate without writing, so on error the buffer is unchanged.
+    // Also lets us keep the fast decode loop branch-free.
     for i in 0..out_len {
         let hi = buf[2 * i];
         let lo = buf[2 * i + 1];
-        let v = decode_pair(hi, lo);
-        debug_assert!((v & 0x0100) == 0);
-        buf[i] = v as u8;
+
+        if unhex_byte(hi).is_none() {
+            return Err(Error::InvalidByte {
+                index: 2 * i,
+                byte: hi,
+            });
+        }
+        if unhex_byte(lo).is_none() {
+            return Err(Error::InvalidByte {
+                index: 2 * i + 1,
+                byte: lo,
+            });
+        }
     }
+
+    // Pass 2: decode. Safe to write now.
+    for i in 0..out_len {
+        let hi = buf[2 * i];
+        let lo = buf[2 * i + 1];
+        // Validation above guarantees this is a valid entry.
+        buf[i] = decode_pair(hi, lo) as u8;
+    }
+
     Ok(out_len)
 }
 
 // ── Scalar decoder ─────────────────────────────────────────────────────────
 
-/// Decode `src_hex` (already length-checked, even) into `dst` (already size-checked).
+#[inline(always)]
 pub(crate) fn decode_scalar(src_hex: &[u8], dst: &mut [u8]) -> Result<usize, Error> {
-    let out_len = dst.len(); // == src_hex.len() / 2
+    // `src_hex` is already even-length checked by the caller.
+    // `dst` is already sized-checked by the caller.
+    let out_len = src_hex.len() >> 1;
 
     // Hot loop: single 16-bit table lookup per output byte.
-    for (i, pair) in src_hex.chunks_exact(2).enumerate() {
-        let hi_byte = pair[0];
-        let lo_byte = pair[1];
+    // Use a tight index-based loop so LLVM can eliminate bounds checks.
+    let mut j = 0usize;
+    for i in 0..out_len {
+        let hi = src_hex[j];
+        let lo = src_hex[j + 1];
 
-        let v = decode_pair(hi_byte, lo_byte);
+        let v = decode_pair(hi, lo);
         if (v & 0x0100) != 0 {
-            // Slow-path only on error: figure out which byte is invalid so we
+            // Slow-path only on error: identify which byte is invalid so we
             // can report the correct index/byte.
-            if unhex_byte(hi_byte).is_none() {
-                return Err(Error::InvalidByte {
-                    index: 2 * i,
-                    byte: hi_byte,
-                });
+            if unhex_byte(hi).is_none() {
+                return Err(Error::InvalidByte { index: j, byte: hi });
             }
             return Err(Error::InvalidByte {
-                index: 2 * i + 1,
-                byte: lo_byte,
+                index: j + 1,
+                byte: lo,
             });
         }
 
         dst[i] = v as u8;
+        j += 2;
     }
 
     Ok(out_len)
@@ -117,10 +134,7 @@ pub(crate) fn decode_scalar(src_hex: &[u8], dst: &mut [u8]) -> Result<usize, Err
 /// Fast table lookup.
 #[inline(always)]
 pub(crate) fn unhex_byte(b: u8) -> Option<u8> {
-    // 256-entry table where 0xFF marks invalid bytes.
-    // Kept for error reporting and for callers that need per-byte validation.
-    static TABLE: [u8; 256] = UNHEX_TABLE;
-    let v = TABLE[b as usize];
+    let v = UNHEX_TABLE[b as usize];
     if v == 0xFF { None } else { Some(v) }
 }
 
@@ -292,8 +306,8 @@ mod tests {
         let err = decode_in_place(&mut buf).unwrap_err();
         // buf must not have been partially modified
         assert_eq!(err, Error::InvalidByte { index: 4, byte: b'X' });
-        // original bytes 0..4 should be unmodified
-        assert_eq!(&buf[..4], b"dead");
+        // buffer must be fully unmodified on error
+        assert_eq!(&buf, b"deadXXef");
     }
 
     #[test]

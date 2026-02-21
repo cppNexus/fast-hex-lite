@@ -1,8 +1,22 @@
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, Throughput};
 use std::hint::black_box;
 use std::time::Duration;
 
 // ── Helpers ──────────────────────────────────────────────────────────────
+
+type MakeHexFn = fn(&[u8]) -> Vec<u8>;
+
+fn bytes_to_hex_lower(src: &[u8]) -> Vec<u8> {
+    let mut hex_buf = vec![0u8; src.len() * 2];
+    // Use the reference implementation to generate *valid* lowercase ASCII hex.
+    // This keeps decode/decode_in_place benches honest and avoids coupling to fast-hex-lite encode.
+    hex::encode_to_slice(src, &mut hex_buf).unwrap();
+    hex_buf
+}
+
+fn make_hex_lower(lower_hex: &[u8]) -> Vec<u8> {
+    lower_hex.to_vec()
+}
 
 /// Simple deterministic LCG — no external dependency needed.
 fn make_random_bytes(n: usize) -> Vec<u8> {
@@ -17,14 +31,8 @@ fn make_random_bytes(n: usize) -> Vec<u8> {
         .collect()
 }
 
-fn bytes_to_hex_lower(src: &[u8]) -> Vec<u8> {
-    let mut hex = vec![0u8; src.len() * 2];
-    fast_hex_lite::encode_to_slice(src, &mut hex, true).unwrap();
-    hex
-}
-
 fn bytes_to_hex_mixed_from_lower(lower_hex: &[u8]) -> Vec<u8> {
-    // Alternating upper/lower to stress validation / mixed-case handling.
+    // Alternating upper/lower to stress mixed-case handling.
     lower_hex
         .iter()
         .enumerate()
@@ -56,15 +64,18 @@ impl SizeClass {
         }
     }
 
-    fn configure(self, group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>) {
-        // Fewer outliers / less jitter: longer measurement for tiny inputs,
-        // fewer samples for huge inputs.
+    fn configure(
+        self,
+        group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
+    ) {
+        // Less jitter: longer measurement for tiny inputs, fewer samples for huge inputs.
         match self {
             SizeClass::Small => {
                 group.sample_size(80);
                 group.warm_up_time(Duration::from_secs(3));
                 group.measurement_time(Duration::from_secs(10));
                 group.noise_threshold(0.03);
+                group.confidence_level(0.99);
             }
             SizeClass::Med => {
                 group.sample_size(60);
@@ -86,83 +97,147 @@ fn fast_hex_variant() -> &'static str {
     // Same bench file works for both `cargo bench` and `cargo bench --features simd`.
     // The library chooses scalar vs simd internally under the `simd` feature.
     if cfg!(feature = "simd") {
-        "fast-hex-lite/simd"
+        "simd"
     } else {
-        "fast-hex-lite/scalar"
+        "scalar"
     }
+}
+
+fn batch_size_for_n(n: usize) -> BatchSize {
+    // For large inputs, the setup cost (clone) is non-trivial; use LargeInput.
+    if n >= 64 * 1024 {
+        BatchSize::LargeInput
+    } else {
+        BatchSize::SmallInput
+    }
+}
+
+#[inline]
+fn is_hex_byte(b: u8) -> bool {
+    matches!(b, b'0'..=b'9' | b'a'..=b'f' | b'A'..=b'F')
+}
+
+fn validate_hex_ascii(hex: &[u8]) -> bool {
+    if (hex.len() & 1) != 0 {
+        return false;
+    }
+    // Tight scalar loop, no allocations, no dst writes.
+    hex.iter().copied().all(is_hex_byte)
+}
+
+#[inline]
+fn debug_assert_valid_hex(hex: &[u8]) {
+    // Bench data must be valid hex. If this ever triggers, the generator is wrong or the buffer
+    // is being reused after in-place decode.
+    debug_assert!(validate_hex_ascii(hex), "bench input is not valid ASCII hex");
 }
 
 // ── Decode benchmarks ─────────────────────────────────────────────────────
 
 fn bench_decode(c: &mut Criterion) {
     for class in [SizeClass::Small, SizeClass::Med, SizeClass::Large] {
-        let mut group = c.benchmark_group(format!("decode/{}", class.name()));
-        class.configure(&mut group);
+        for (case_name, make_hex) in [
+            ("lower", make_hex_lower as MakeHexFn),
+            ("mixed", bytes_to_hex_mixed_from_lower as MakeHexFn),
+        ] {
+            let mut group = c.benchmark_group(format!(
+                "{}/decode/{}/{case_name}",
+                fast_hex_variant(),
+                class.name()
+            ));
+            class.configure(&mut group);
 
-        for &n in class.sizes() {
-            let src = make_random_bytes(n);
-            let hex_lower = bytes_to_hex_lower(&src);
-            let hex_mixed = bytes_to_hex_mixed_from_lower(&hex_lower);
+            for &n in class.sizes() {
+                let src = make_random_bytes(n);
+                let hex_lower = bytes_to_hex_lower(&src);
+                let hex = make_hex(&hex_lower);
 
-            // Pre-allocate destination for *all* decoders.
-            let mut dst = vec![0u8; n];
+                debug_assert_valid_hex(&hex);
 
-            // Throughput in decoded bytes.
-            group.throughput(Throughput::Bytes(n as u64));
+                // Destination is pre-allocated once per size (no per-iter allocation).
+                let mut dst = vec![0u8; n];
 
-            // fast-hex-lite: lowercase input
-            group.bench_with_input(
-                BenchmarkId::new(format!("{}/decode/lower", fast_hex_variant()), n),
-                &n,
-                |b, _| {
-                    b.iter(|| {
-                        fast_hex_lite::decode_to_slice(black_box(&hex_lower), black_box(&mut dst))
-                            .unwrap()
-                    })
-                },
-            );
+                // Throughput base for decode: **decoded output bytes**.
+                // This avoids “double counting” (hex input is 2×) and makes results easier to compare.
+                group.throughput(Throughput::Bytes(n as u64));
 
-            // fast-hex-lite: mixed-case input
-            group.bench_with_input(
-                BenchmarkId::new(format!("{}/decode/mixed", fast_hex_variant()), n),
-                &n,
-                |b, _| {
-                    b.iter(|| {
-                        fast_hex_lite::decode_to_slice(black_box(&hex_mixed), black_box(&mut dst))
-                            .unwrap()
-                    })
-                },
-            );
+                // fast-hex-lite (scalar/simd)
+                group.bench_with_input(
+                    BenchmarkId::new("fast-hex-lite", n),
+                    &hex,
+                    |b, hex_in| {
+                        b.iter(|| {
+                            let written = fast_hex_lite::decode_to_slice(
+                                black_box(hex_in),
+                                &mut dst,
+                            )
+                            .unwrap();
+                            black_box(written);
+                        })
+                    },
+                );
 
-            // hex crate: decode into pre-allocated buffer (no per-iter allocation)
-            // NOTE: hex::decode_to_slice takes &str, so we build it once.
-            let hex_lower_str = core::str::from_utf8(&hex_lower).unwrap();
-            let hex_mixed_str = core::str::from_utf8(&hex_mixed).unwrap();
+                // hex crate (no per-iter allocation)
+                group.bench_with_input(
+                    BenchmarkId::new("hex-crate", n),
+                    &hex,
+                    |b, hex_in| {
+                        b.iter(|| {
+                            let written = hex::decode_to_slice(
+                                black_box(hex_in.as_slice()),
+                                &mut dst,
+                            )
+                            .unwrap();
+                            black_box(written);
+                        })
+                    },
+                );
+            }
 
-            group.bench_with_input(
-                BenchmarkId::new("hex-crate/decode/lower", n),
-                &n,
-                |b, _| {
-                    b.iter(|| {
-                        let written = hex::decode_to_slice(black_box(hex_lower_str), black_box(&mut dst)).unwrap();
-                        black_box(written)
-                    })
-                },
-            );
-
-            group.bench_with_input(
-                BenchmarkId::new("hex-crate/decode/mixed", n),
-                &n,
-                |b, _| {
-                    b.iter(|| {
-                        let written = hex::decode_to_slice(black_box(hex_mixed_str), black_box(&mut dst)).unwrap();
-                        black_box(written)
-                    })
-                },
-            );
+            group.finish();
         }
+    }
+}
 
-        group.finish();
+// ── Validate-only benchmarks (no decode, no dst writes) ──────────────────
+
+fn bench_validate_only(c: &mut Criterion) {
+    for class in [SizeClass::Small, SizeClass::Med, SizeClass::Large] {
+        for (case_name, make_hex) in [
+            ("lower", make_hex_lower as MakeHexFn),
+            ("mixed", bytes_to_hex_mixed_from_lower as MakeHexFn),
+        ] {
+            let mut group = c.benchmark_group(format!(
+                "{}/validate_only/{}/{case_name}",
+                fast_hex_variant(),
+                class.name()
+            ));
+            class.configure(&mut group);
+
+            for &n in class.sizes() {
+                let src = make_random_bytes(n);
+                let hex_lower = bytes_to_hex_lower(&src);
+                let hex = make_hex(&hex_lower);
+
+                debug_assert_valid_hex(&hex);
+
+                // Throughput base for validate-only: **input hex bytes** (we only read/validate the hex buffer).
+                group.throughput(Throughput::Bytes(hex.len() as u64));
+
+                group.bench_with_input(
+                    BenchmarkId::new("validate", n),
+                    &hex,
+                    |b, hex_in| {
+                        b.iter(|| {
+                            let ok = validate_hex_ascii(black_box(hex_in));
+                            black_box(ok);
+                        })
+                    },
+                );
+            }
+
+            group.finish();
+        }
     }
 }
 
@@ -170,50 +245,83 @@ fn bench_decode(c: &mut Criterion) {
 
 fn bench_encode(c: &mut Criterion) {
     for class in [SizeClass::Small, SizeClass::Med, SizeClass::Large] {
-        let mut group = c.benchmark_group(format!("encode/{}", class.name()));
-        class.configure(&mut group);
+        // Lowercase: fair comparison (hex crate only does lowercase).
+        {
+            let mut group = c.benchmark_group(format!(
+                "{}/encode/{}/lower",
+                fast_hex_variant(),
+                class.name()
+            ));
+            class.configure(&mut group);
 
-        for &n in class.sizes() {
-            let src = make_random_bytes(n);
-            let mut dst = vec![0u8; n * 2];
+            for &n in class.sizes() {
+                let src = make_random_bytes(n);
+                let mut dst = vec![0u8; n * 2];
 
-            group.throughput(Throughput::Bytes(n as u64));
+                // Throughput base for encode: **input bytes**.
+                group.throughput(Throughput::Bytes(n as u64));
 
-            // fast-hex-lite: lower
-            group.bench_with_input(
-                BenchmarkId::new(format!("{}/encode/lower", fast_hex_variant()), n),
-                &n,
-                |b, _| {
+                group.bench_with_input(
+                    BenchmarkId::new("fast-hex-lite", n),
+                    &src,
+                    |b, s| {
+                        b.iter(|| {
+                            let written = fast_hex_lite::encode_to_slice(
+                                black_box(s),
+                                &mut dst,
+                                true,
+                            )
+                            .unwrap();
+                            black_box(written);
+                        })
+                    },
+                );
+
+                group.bench_with_input(BenchmarkId::new("hex-crate", n), &src, |b, s| {
                     b.iter(|| {
-                        fast_hex_lite::encode_to_slice(black_box(&src), black_box(&mut dst), true).unwrap()
+                        hex::encode_to_slice(black_box(s), &mut dst).unwrap();
+                        black_box(&dst[..]);
                     })
-                },
-            );
+                });
+            }
 
-            // fast-hex-lite: upper
-            group.bench_with_input(
-                BenchmarkId::new(format!("{}/encode/upper", fast_hex_variant()), n),
-                &n,
-                |b, _| {
-                    b.iter(|| {
-                        fast_hex_lite::encode_to_slice(black_box(&src), black_box(&mut dst), false).unwrap()
-                    })
-                },
-            );
-
-            // hex crate: encode into pre-allocated buffer (no per-iter allocation)
-            group.bench_with_input(
-                BenchmarkId::new("hex-crate/encode/lower", n),
-                &n,
-                |b, _| {
-                    b.iter(|| {
-                        hex::encode_to_slice(black_box(&src), black_box(&mut dst)).unwrap();
-                    })
-                },
-            );
+            group.finish();
         }
 
-        group.finish();
+        // Uppercase: fast-hex-lite only (hex crate doesn’t provide uppercase-to-slice).
+        {
+            let mut group = c.benchmark_group(format!(
+                "{}/encode/{}/upper",
+                fast_hex_variant(),
+                class.name()
+            ));
+            class.configure(&mut group);
+
+            for &n in class.sizes() {
+                let src = make_random_bytes(n);
+                let mut dst = vec![0u8; n * 2];
+
+                group.throughput(Throughput::Bytes(n as u64));
+
+                group.bench_with_input(
+                    BenchmarkId::new("fast-hex-lite", n),
+                    &src,
+                    |b, s| {
+                        b.iter(|| {
+                            let written = fast_hex_lite::encode_to_slice(
+                                black_box(s),
+                                &mut dst,
+                                false,
+                            )
+                            .unwrap();
+                            black_box(written);
+                        })
+                    },
+                );
+            }
+
+            group.finish();
+        }
     }
 }
 
@@ -221,31 +329,39 @@ fn bench_encode(c: &mut Criterion) {
 
 fn bench_decode_in_place(c: &mut Criterion) {
     // in-place only makes sense when you already have a hex buffer.
-    // keep sizes smaller to avoid huge clone cost dominating.
+    // Clone/setup cost is excluded via `iter_batched_ref`.
     for class in [SizeClass::Small, SizeClass::Med, SizeClass::Large] {
-        let sizes = match class {
-            SizeClass::Small => &[32usize, 256usize][..],
-            SizeClass::Med => &[4 * 1024usize][..],
-            SizeClass::Large => &[64 * 1024usize][..],
-        };
-
-        let mut group = c.benchmark_group(format!("decode_in_place/{}", class.name()));
+        // Keep it realistic: decode_in_place is mainly interesting for lower-case payloads.
+        let mut group = c.benchmark_group(format!(
+            "{}/decode_in_place/{}",
+            fast_hex_variant(),
+            class.name()
+        ));
         class.configure(&mut group);
 
-        for &n in sizes {
+        for &n in class.sizes() {
+            // `n` is *decoded* bytes, hex is 2*n bytes.
             let src = make_random_bytes(n);
             let hex = bytes_to_hex_lower(&src);
 
+            debug_assert_valid_hex(&hex);
+
+            // Throughput base for decode_in_place: **decoded output bytes**.
             group.throughput(Throughput::Bytes(n as u64));
 
             group.bench_with_input(
-                BenchmarkId::new(format!("{}/decode_in_place", fast_hex_variant()), n),
-                &n,
-                |b, _| {
-                    b.iter(|| {
-                        let mut buf = hex.clone();
-                        fast_hex_lite::decode_in_place(black_box(&mut buf)).unwrap()
-                    })
+                BenchmarkId::new("fast-hex-lite", n),
+                &hex,
+                |b, hex_in| {
+                    let bs = batch_size_for_n(n);
+                    b.iter_batched(
+                        || hex_in.clone(),
+                        |mut buf| {
+                            let written = fast_hex_lite::decode_in_place(black_box(&mut buf)).unwrap();
+                            black_box(&buf[..written]);
+                        },
+                        bs,
+                    )
                 },
             );
         }
@@ -254,5 +370,5 @@ fn bench_decode_in_place(c: &mut Criterion) {
     }
 }
 
-criterion_group!(benches, bench_decode, bench_encode, bench_decode_in_place);
+criterion_group!(benches, bench_decode, bench_validate_only, bench_encode, bench_decode_in_place);
 criterion_main!(benches);

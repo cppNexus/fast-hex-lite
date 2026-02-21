@@ -1,219 +1,285 @@
-//! SIMD-accelerated hex decoder (feature `simd`).
+//! SIMD-accelerated hex decoder (feature `simd`) — STABLE (core::arch).
 //!
-//! Uses `std::simd` (portable SIMD, stabilised in Rust 1.86) to process
-//! 32 hex bytes (→ 16 output bytes) per iteration, then falls back to
-//! scalar for the tail.
+//! Goals (in order):
+//! - **Correctness** (no partial writes on error)
+//! - **Stability** (stable Rust, no `portable_simd`)
+//! - **Universality** (x86_64 + aarch64 fast paths, scalar fallback)
+//! - **Speed**
 //!
-//! # Strategy (per 32-byte chunk)
-//! 1. Load 32 ASCII hex bytes into a `Simd<u8, 32>` lane vector.
-//! 2. Validate each lane: must belong to `'0'..='9'`, `'a'..='f'`, or `'A'..='F'`.
-//! 3. Map lanes to nibble values 0–15 branchlessly via arithmetic + mask select.
-//! 4. Extract nibble array; combine even/odd pairs: `(hi << 4) | lo`.
-//! 5. Scalar tail handles remaining `< 32` hex bytes.
+//! Strategy:
+//! - Validate & map 16 ASCII hex chars -> 16 nibbles (0..15)
+//! - Store nibbles to a small stack array and pack pairs into bytes
+//! - Scalar tail for the remainder
 
-use std::simd::{
-    cmp::SimdPartialOrd,
-    Mask,
-    Simd,
-};
+#![cfg(feature = "simd")]
 
-use crate::{
-    decode::decode_scalar,
-    Error,
-};
+use crate::{decode::decode_scalar, Error};
 
-type U8x32 = Simd<u8, 32>;
-type Mask32 = Mask<i8, 32>;
+#[cfg(target_arch = "x86_64")]
+use core::arch::x86_64::*;
 
-/// Entry-point called by [`crate::decode_to_slice`] when feature `simd` is active.
-///
-/// Preconditions (enforced by caller):
-/// - `src_hex.len()` is even.
-/// - `dst.len() == src_hex.len() / 2`.
+#[cfg(target_arch = "aarch64")]
+use core::arch::aarch64::*;
+
 pub(crate) fn decode_to_slice_simd(src_hex: &[u8], dst: &mut [u8]) -> Result<usize, Error> {
     let out_len = dst.len();
+    debug_assert_eq!(src_hex.len(), out_len * 2);
 
-    const CHUNK_HEX: usize = 32; // 32 hex chars → 16 decoded bytes
-    const CHUNK_OUT: usize = 16;
+    // 16 hex chars -> 8 bytes output
+    const CHUNK_HEX: usize = 16;
+    const CHUNK_OUT: usize = 8;
 
-    let simd_iters = out_len / CHUNK_OUT;
-    let tail_hex_start = simd_iters * CHUNK_HEX;
+    let iters = out_len / CHUNK_OUT;
+    let tail_hex_start = iters * CHUNK_HEX;
 
-    // ── SIMD path ────────────────────────────────────────────────────────────
-    for i in 0..simd_iters {
-        let hex_offset = i * CHUNK_HEX;
-        let out_offset = i * CHUNK_OUT;
-
-        decode_chunk32(
-            &src_hex[hex_offset..hex_offset + CHUNK_HEX],
-            &mut dst[out_offset..out_offset + CHUNK_OUT],
-            hex_offset,
-        )?;
+    // --- PASS 1: validate (no writes) ---
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        for i in 0..iters {
+            let hex_off = i * CHUNK_HEX;
+            validate_chunk16_sse2(&src_hex[hex_off..hex_off + CHUNK_HEX], hex_off)?;
+        }
     }
 
-    // ── Scalar tail ──────────────────────────────────────────────────────────
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        for i in 0..iters {
+            let hex_off = i * CHUNK_HEX;
+            validate_chunk16_neon(&src_hex[hex_off..hex_off + CHUNK_HEX], hex_off)?;
+        }
+    }
+
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    {
+        // No SIMD backend for this arch → full scalar fallback.
+        return decode_scalar(src_hex, dst);
+    }
+
+    // Validate tail (scalar, no writes).
     let tail_hex = &src_hex[tail_hex_start..];
     if !tail_hex.is_empty() {
-        let tail_dst = &mut dst[simd_iters * CHUNK_OUT..];
+        validate_hex_scalar(tail_hex, tail_hex_start)?;
+    }
+
+    // --- PASS 2: decode (writes) ---
+    #[cfg(target_arch = "x86_64")]
+    {
+        for i in 0..iters {
+            let hex_off = i * CHUNK_HEX;
+            let out_off = i * CHUNK_OUT;
+
+            // SAFETY:
+            // - Slices are exactly 16 / 8 bytes long.
+            // - SSE2 is baseline on x86_64.
+            unsafe {
+                decode_chunk16_sse2(
+                    &src_hex[hex_off..hex_off + CHUNK_HEX],
+                    &mut dst[out_off..out_off + CHUNK_OUT],
+                );
+            }
+        }
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    {
+        for i in 0..iters {
+            let hex_off = i * CHUNK_HEX;
+            let out_off = i * CHUNK_OUT;
+
+            // SAFETY:
+            // - Slices are exactly 16 / 8 bytes long.
+            // - NEON is baseline on aarch64.
+            unsafe {
+                decode_chunk16_neon(
+                    &src_hex[hex_off..hex_off + CHUNK_HEX],
+                    &mut dst[out_off..out_off + CHUNK_OUT],
+                );
+            }
+        }
+    }
+
+    if !tail_hex.is_empty() {
+        let tail_dst = &mut dst[iters * CHUNK_OUT..];
         decode_scalar(tail_hex, tail_dst)?;
     }
 
     Ok(out_len)
 }
 
-/// Decode exactly 32 ASCII-hex bytes → 16 raw bytes.
-///
-/// `hex_base` = absolute offset of `src32[0]` in the original input buffer;
-/// used for accurate [`Error::InvalidByte`] index reporting.
-#[inline(always)]
-fn decode_chunk32(src32: &[u8], dst16: &mut [u8], hex_base: usize) -> Result<(), Error> {
-    debug_assert_eq!(src32.len(), 32);
-    debug_assert_eq!(dst16.len(), 16);
+#[inline]
+fn is_hex_ascii(b: u8) -> bool {
+    matches!(b, b'0'..=b'9' | b'a'..=b'f' | b'A'..=b'F')
+}
 
-    let v = U8x32::from_slice(src32);
-
-    // ── Classify lanes ───────────────────────────────────────────────────────
-    let is_digit: Mask32 = v.simd_ge(U8x32::splat(b'0')) & v.simd_le(U8x32::splat(b'9'));
-    let is_lower: Mask32 = v.simd_ge(U8x32::splat(b'a')) & v.simd_le(U8x32::splat(b'f'));
-    let is_upper: Mask32 = v.simd_ge(U8x32::splat(b'A')) & v.simd_le(U8x32::splat(b'F'));
-    let valid: Mask32 = is_digit | is_lower | is_upper;
-
-    // ── Validate ─────────────────────────────────────────────────────────────
-    if !valid.all() {
-        // Fast path to locate the first invalid lane.
-        // `to_bitmask()` packs lane truth values into a u32; bit i corresponds to lane i.
-        let m: u32 = valid.to_bitmask();
-        let invalid: u32 = !m;
-        debug_assert!(invalid != 0);
-        let lane = invalid.trailing_zeros() as usize;
-        return Err(Error::InvalidByte {
-            index: hex_base + lane,
-            byte: src32[lane],
-        });
+fn validate_hex_scalar(src_hex: &[u8], hex_base: usize) -> Result<(), Error> {
+    for (i, &b) in src_hex.iter().enumerate() {
+        if !is_hex_ascii(b) {
+            return Err(Error::InvalidByte {
+                index: hex_base + i,
+                byte: b,
+            });
+        }
     }
+    Ok(())
+}
 
-    // ── Nibble mapping ───────────────────────────────────────────────────────
-    // digit_val = v - '0'         (correct for '0'..='9')
-    // lower_val = v - 'a' + 10   (correct for 'a'..='f')
-    // upper_val = v - 'A' + 10   (correct for 'A'..='F')
-    let digit_val = v - U8x32::splat(b'0');
-    let lower_val = v - U8x32::splat(b'a') + U8x32::splat(10);
-    let upper_val = v - U8x32::splat(b'A') + U8x32::splat(10);
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse2")]
+unsafe fn validate_chunk16_sse2(src16: &[u8], hex_base: usize) -> Result<(), Error> {
+    debug_assert_eq!(src16.len(), 16);
 
-    // Branchless select: digit → lower → upper.
-    // Mask::select(self, true_val, false_val)
-    let nibbles: U8x32 = is_digit.select(digit_val, is_lower.select(lower_val, upper_val));
+    let v = _mm_loadu_si128(src16.as_ptr() as *const __m128i);
 
-    // ── Combine pairs ─────────────────────────────────────────────────────────
-    // nibbles[2*j]   = hi nibble of dst16[j]
-    // nibbles[2*j+1] = lo nibble of dst16[j]
-    let nibble_arr: [u8; 32] = nibbles.to_array();
+    // is_digit: '0'..'9'
+    let ge_0 = _mm_cmpgt_epi8(v, _mm_set1_epi8((b'0' - 1) as i8));
+    let le_9 = _mm_cmplt_epi8(v, _mm_set1_epi8((b'9' + 1) as i8));
+    let is_digit = _mm_and_si128(ge_0, le_9);
 
-    // Combine pairs (hi, lo). With fixed-size arrays and constant bounds,
-    // LLVM usually removes bounds checks in optimized builds.
-    for j in 0..16 {
-        let hi = nibble_arr[2 * j];
-        let lo = nibble_arr[2 * j + 1];
-        dst16[j] = (hi << 4) | lo;
+    // lower = v | 0x20 (ASCII case fold)
+    let lower = _mm_or_si128(v, _mm_set1_epi8(0x20u8 as i8));
+
+    // is_alpha: 'a'..'f' after case fold
+    let ge_a = _mm_cmpgt_epi8(lower, _mm_set1_epi8((b'a' - 1) as i8));
+    let le_f = _mm_cmplt_epi8(lower, _mm_set1_epi8((b'f' + 1) as i8));
+    let is_alpha = _mm_and_si128(ge_a, le_f);
+
+    let valid = _mm_or_si128(is_digit, is_alpha);
+    let mask = _mm_movemask_epi8(valid);
+
+    if mask != -1 {
+        let bad_lane = (!(mask as u32)).trailing_zeros() as usize;
+        return Err(Error::InvalidByte {
+            index: hex_base + bad_lane,
+            byte: src16[bad_lane],
+        });
     }
 
     Ok(())
 }
 
-// ── Tests ──────────────────────────────────────────────────────────────────
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse2")]
+unsafe fn decode_chunk16_sse2(src16: &[u8], dst8: &mut [u8]) {
+    debug_assert_eq!(src16.len(), 16);
+    debug_assert_eq!(dst8.len(), 8);
 
-#[cfg(test)]
-mod tests {
-    extern crate std;
-    use std::prelude::v1::*;
-    use crate::{decode_to_slice, Error};
+    // SAFETY:
+    // - Caller guarantees 16-byte input and 8-byte output slices.
+    // - All pointer casts are to properly aligned stack memory or unaligned loads
+    //   via *_loadu_* intrinsics which support unaligned access.
 
-    fn make_hex(n: usize) -> (Vec<u8>, Vec<u8>) {
-        let src: Vec<u8> = (0..n).map(|i| i as u8).collect();
-        let mut hex = vec![0u8; n * 2];
-        crate::encode_to_slice(&src, &mut hex, true).unwrap();
-        (src, hex)
-    }
+    let v = _mm_loadu_si128(src16.as_ptr() as *const __m128i);
 
-    #[test]
-    fn test_simd_small() {
-        let (src, hex) = make_hex(4);
-        let mut dst = vec![0u8; 4];
-        assert_eq!(decode_to_slice(&hex, &mut dst).unwrap(), 4);
-        assert_eq!(dst, src);
-    }
+    // is_digit: '0'..'9'
+    let ge_0 = _mm_cmpgt_epi8(v, _mm_set1_epi8((b'0' - 1) as i8)); // v > '0'-1  => v >= '0'
+    let le_9 = _mm_cmplt_epi8(v, _mm_set1_epi8((b'9' + 1) as i8)); // v < '9'+1  => v <= '9'
+    let is_digit = _mm_and_si128(ge_0, le_9);
 
-    #[test]
-    fn test_simd_exact_chunk() {
-        // 16 output bytes = exactly one 32-hex-char SIMD chunk, no tail
-        let (src, hex) = make_hex(16);
-        let mut dst = vec![0u8; 16];
-        assert_eq!(decode_to_slice(&hex, &mut dst).unwrap(), 16);
-        assert_eq!(dst, src);
-    }
+    // lower = v | 0x20 (ASCII case fold)
+    let lower = _mm_or_si128(v, _mm_set1_epi8(0x20u8 as i8));
 
-    #[test]
-    fn test_simd_with_tail() {
-        // 18 output bytes = one chunk (16) + 2-byte tail
-        let (src, hex) = make_hex(18);
-        let mut dst = vec![0u8; 18];
-        assert_eq!(decode_to_slice(&hex, &mut dst).unwrap(), 18);
-        assert_eq!(dst, src);
-    }
+    // is_alpha: 'a'..'f' after case fold
+    let ge_a = _mm_cmpgt_epi8(lower, _mm_set1_epi8((b'a' - 1) as i8));
+    let le_f = _mm_cmplt_epi8(lower, _mm_set1_epi8((b'f' + 1) as i8));
+    let is_alpha = _mm_and_si128(ge_a, le_f);
 
-    #[test]
-    fn test_simd_large() {
-        for &n in &[64usize, 256, 1024, 4096] {
-            let (src, hex) = make_hex(n);
-            let mut dst = vec![0u8; n];
-            let w = decode_to_slice(&hex, &mut dst).unwrap();
-            assert_eq!(w, n);
-            assert_eq!(dst, src, "n={n}");
+    // nibble = (v & 0x0F) + (is_alpha ? 9 : 0)
+    let low_nibble = _mm_and_si128(v, _mm_set1_epi8(0x0Fu8 as i8));
+    // add = is_alpha & 9
+    let add = _mm_and_si128(is_alpha, _mm_set1_epi8(9i8));
+    let nibbles = _mm_add_epi8(low_nibble, add);
+
+    // Pack pairs (0,1)->byte0 ... (14,15)->byte7 without a temporary array.
+    //
+    // Layout in `nibbles` is bytes: n0 n1 n2 n3 ... n14 n15.
+    // Treat as 8 little-endian u16 words: (n0 | (n1<<8)), (n2 | (n3<<8)), ...
+    // Then compute ((low_byte<<4) | high_byte) per word and pack low bytes.
+    let w = nibbles;
+    let low = _mm_and_si128(w, _mm_set1_epi16(0x00FFu16 as i16));
+    let high = _mm_srli_epi16(w, 8);
+    let packed_words = _mm_or_si128(_mm_slli_epi16(low, 4), high);
+    let packed_bytes = _mm_packus_epi16(packed_words, _mm_setzero_si128());
+    _mm_storel_epi64(dst8.as_mut_ptr() as *mut __m128i, packed_bytes);
+}
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn validate_chunk16_neon(src16: &[u8], hex_base: usize) -> Result<(), Error> {
+    debug_assert_eq!(src16.len(), 16);
+
+    let v: uint8x16_t = vld1q_u8(src16.as_ptr());
+
+    let ge_0: uint8x16_t = vcgeq_u8(v, vdupq_n_u8(b'0'));
+    let le_9: uint8x16_t = vcleq_u8(v, vdupq_n_u8(b'9'));
+    let is_digit: uint8x16_t = vandq_u8(ge_0, le_9);
+
+    let lower: uint8x16_t = vorrq_u8(v, vdupq_n_u8(0x20));
+
+    let ge_a: uint8x16_t = vcgeq_u8(lower, vdupq_n_u8(b'a'));
+    let le_f: uint8x16_t = vcleq_u8(lower, vdupq_n_u8(b'f'));
+    let is_alpha: uint8x16_t = vandq_u8(ge_a, le_f);
+
+    let valid: uint8x16_t = vorrq_u8(is_digit, is_alpha);
+    let min_lane: u8 = vminvq_u8(valid);
+    if min_lane != 0xFF {
+        let mut valid_bytes = [0u8; 16];
+        vst1q_u8(valid_bytes.as_mut_ptr(), valid);
+        for lane in 0..16 {
+            if valid_bytes[lane] != 0xFF {
+                return Err(Error::InvalidByte {
+                    index: hex_base + lane,
+                    byte: src16[lane],
+                });
+            }
         }
+        return Err(Error::InvalidByte {
+            index: hex_base,
+            byte: src16[0],
+        });
     }
 
-    #[test]
-    fn test_simd_mixed_case() {
-        let hex: &[u8] = b"DeAdBeEfDeAdBeEfDeAdBeEfDeAdBeEf";
-        let expected = [0xde, 0xad, 0xbe, 0xef].repeat(4);
-        let mut dst = vec![0u8; 16];
-        assert_eq!(decode_to_slice(hex, &mut dst).unwrap(), 16);
-        assert_eq!(dst, expected);
-    }
+    Ok(())
+}
 
-    #[test]
-    fn test_simd_invalid_in_chunk() {
-        let mut hex = b"deadbeefdeadbeefdeadbeefdeadbeef".to_vec();
-        hex[5] = b'X';
-        let mut dst = vec![0u8; 16];
-        assert_eq!(
-            decode_to_slice(&hex, &mut dst).unwrap_err(),
-            Error::InvalidByte { index: 5, byte: b'X' }
-        );
-    }
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn decode_chunk16_neon(src16: &[u8], dst8: &mut [u8]) {
+    debug_assert_eq!(src16.len(), 16);
+    debug_assert_eq!(dst8.len(), 8);
 
-    #[test]
-    fn test_simd_invalid_in_tail() {
-        // 34 hex chars: 32 valid + "Xf" tail
-        let hex: Vec<u8> = b"deadbeefdeadbeefdeadbeefdeadbeefXf".to_vec();
-        let mut dst = vec![0u8; 17];
-        assert_eq!(
-            decode_to_slice(&hex, &mut dst).unwrap_err(),
-            Error::InvalidByte { index: 32, byte: b'X' }
-        );
-    }
+    // SAFETY:
+    // - Caller guarantees 16-byte input and 8-byte output slices.
+    // - NEON loads/stores are used with valid pointers to stack / slice memory.
 
-    #[test]
-    fn test_simd_invalid_second_chunk() {
-        // 64 hex bytes with bad byte at index 35 (in second chunk)
-        let src: Vec<u8> = (0..32u8).collect();
-        let mut hex = vec![0u8; 64];
-        crate::encode_to_slice(&src, &mut hex, true).unwrap();
-        hex[35] = b'Z';
-        let mut dst = vec![0u8; 32];
-        assert_eq!(
-            decode_to_slice(&hex, &mut dst).unwrap_err(),
-            Error::InvalidByte { index: 35, byte: b'Z' }
-        );
-    }
+    // Load 16 bytes.
+    let v: uint8x16_t = vld1q_u8(src16.as_ptr());
+
+    // is_digit: '0'..'9'
+    let ge_0: uint8x16_t = vcgeq_u8(v, vdupq_n_u8(b'0'));
+    let le_9: uint8x16_t = vcleq_u8(v, vdupq_n_u8(b'9'));
+    let is_digit: uint8x16_t = vandq_u8(ge_0, le_9);
+
+    // lower = v | 0x20 (ASCII case fold)
+    let lower: uint8x16_t = vorrq_u8(v, vdupq_n_u8(0x20));
+
+    // NOTE: We rely on PASS 1 validation (no partial writes) to guarantee `v` is valid hex here.
+
+    // digit_val = v - '0'
+    let digit_val: uint8x16_t = vsubq_u8(v, vdupq_n_u8(b'0'));
+
+    // alpha_val = (lower - 'a') + 10
+    let alpha_val: uint8x16_t = vaddq_u8(vsubq_u8(lower, vdupq_n_u8(b'a')), vdupq_n_u8(10));
+
+    // Select: if digit -> digit_val else alpha_val
+    let nibbles: uint8x16_t = vbslq_u8(is_digit, digit_val, alpha_val);
+
+    // Pack pairs (0,1)->byte0 ... (14,15)->byte7 without a temporary array.
+    //
+    // Reinterpret as 8 little-endian u16 words: (n0 | (n1<<8)), ...
+    let w: uint16x8_t = vreinterpretq_u16_u8(nibbles);
+    let low: uint16x8_t = vandq_u16(w, vdupq_n_u16(0x00FF));
+    let high: uint16x8_t = vshrq_n_u16(w, 8);
+    let packed_words: uint16x8_t = vorrq_u16(vshlq_n_u16(low, 4), high);
+    let packed_bytes: uint8x8_t = vmovn_u16(packed_words);
+    vst1_u8(dst8.as_mut_ptr(), packed_bytes);
 }

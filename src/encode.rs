@@ -13,7 +13,7 @@ pub const fn encoded_len(n: usize) -> usize {
 /// # Errors
 ///
 /// Returns [`Error::OutputTooSmall`] if `dst_hex` is not large enough.
-#[inline(always)]
+#[inline]
 pub fn encode_to_slice(
     src: &[u8],
     dst_hex: &mut [u8],
@@ -30,34 +30,29 @@ pub fn encode_to_slice(
         b"0123456789ABCDEF"
     };
 
-    let mut src_ptr = src.as_ptr();
-    let mut dst_ptr = dst_hex.as_mut_ptr();
-
-    // SAFETY:
-    // - dst_hex is validated to be large enough
-    // - we advance exactly src.len() * 2 bytes in dst
-    // - no overlapping regions
-    unsafe {
-        for _ in 0..src.len() {
-            let byte = *src_ptr;
-            *dst_ptr = alphabet[(byte >> 4) as usize];
-            *dst_ptr.add(1) = alphabet[(byte & 0x0f) as usize];
-
-            src_ptr = src_ptr.add(1);
-            dst_ptr = dst_ptr.add(2);
-        }
+    // SAFETY-FREE hot loop:
+    // - dst_hex length already validated
+    // - we write exactly 2 bytes per input byte
+    for (byte, out_pair) in src.iter().copied().zip(dst_hex[..out_len].chunks_exact_mut(2)) {
+        out_pair[0] = alphabet[(byte >> 4) as usize];
+        out_pair[1] = alphabet[(byte & 0x0f) as usize];
     }
 
     Ok(out_len)
 }
-
-#[cfg(feature = "std")]
 /// Encode into a newly allocated `String`.
+///
+/// Available only with the `std` feature.
+#[cfg(feature = "std")]
+#[inline]
+#[allow(dead_code)]
 pub fn encode_to_string(src: &[u8], lowercase: bool) -> String {
     let mut out = vec![0u8; encoded_len(src.len())];
     // infallible because buffer is pre-sized
     let _ = encode_to_slice(src, &mut out, lowercase);
-    unsafe { String::from_utf8_unchecked(out) }
+
+    // Always valid UTF-8 because we only write ASCII hex characters.
+    String::from_utf8(out).expect("hex output is always valid UTF-8")
 }
 
 #[cfg(test)]

@@ -1,36 +1,50 @@
 # fast-hex-lite
 
-Ultra-fast hex encoding/decoding in Rust with **zero allocations** and `#![no_std]` support.
+Ultra-fast hex encoding/decoding in Rust with zero allocations and `#![no_std]` support.
 
 [![Crates.io](https://img.shields.io/crates/v/fast-hex-lite.svg)](https://crates.io/crates/fast-hex-lite)
 [![Docs.rs](https://docs.rs/fast-hex-lite/badge.svg)](https://docs.rs/fast-hex-lite)
-[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
+[![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
+
+Designed for performance-critical systems such as cryptography,
+networking stacks, blockchain infrastructure, and embedded environments
+where `no_std` and zero heap usage are mandatory.
 
 ---
 
 ## Features
 
-| Feature   | Default | Description                                            |
-|-----------|:-------:|--------------------------------------------------------|
-| _(none)_  | ✓       | `no_std` + alloc-free scalar encoder/decoder           |
-| `std`     |         | Implements `std::error::Error` on `Error`              |
-| `simd`    |         | SIMD-accelerated decoder via `std::simd` (implies `std`, Rust 1.88+) |
+| Feature   | Default | Description                                              |
+|-----------|:-------:|----------------------------------------------------------|
+| _(none)_  | yes     | `no_std`, alloc-free scalar encoder/decoder              |
+| `std`     |         | Implements `std::error::Error` for `Error`               |
+| `simd`    |         | SIMD-accelerated decoder via `std::simd` (implies `std`) |
+
+---
 
 ## Installation
 
 ```toml
-# Default (no_std, scalar only)
+# Default: no_std, scalar only
 [dependencies]
 fast-hex-lite = "0.1"
 
-# With SIMD acceleration (requires std, nightly not required on 1.88+)
+# With SIMD acceleration
 [dependencies]
 fast-hex-lite = { version = "0.1", features = ["simd"] }
+
+# Explicit no_std (same as default)
+[dependencies]
+fast-hex-lite = { version = "0.1", default-features = false }
 ```
 
-## Zero-alloc usage
+---
 
-### `decode_to_slice` — hex bytes → raw bytes
+## Usage
+
+All APIs operate on caller-provided buffers. No heap allocations occur.
+
+### Decode hex to bytes
 
 ```rust
 use fast_hex_lite::decode_to_slice;
@@ -40,26 +54,24 @@ let mut buf = [0u8; 4];
 let n = decode_to_slice(hex, &mut buf).unwrap();
 assert_eq!(&buf[..n], &[0xde, 0xad, 0xbe, 0xef]);
 
-// Accepts uppercase and mixed-case too:
-let mut buf2 = [0u8; 4];
-decode_to_slice(b"DEADBEEF", &mut buf2).unwrap();
-decode_to_slice(b"DeAdBeEf", &mut buf2).unwrap();
+// Uppercase and mixed-case are accepted
+decode_to_slice(b"DEADBEEF", &mut buf).unwrap();
+decode_to_slice(b"DeAdBeEf", &mut buf).unwrap();
 ```
 
-### `decode_in_place` — decode into the same buffer
+### Decode in-place
 
-Useful when the hex string is in a mutable buffer and you want to avoid
-even a second stack allocation.
+Decodes ASCII hex in a mutable buffer into its own first half. No secondary buffer required.
 
 ```rust
 use fast_hex_lite::decode_in_place;
 
-let mut buf = *b"deadbeef";  // 8 bytes of ASCII hex
-let n = decode_in_place(&mut buf).unwrap(); // writes to buf[0..4]
+let mut buf = *b"deadbeef";
+let n = decode_in_place(&mut buf).unwrap();
 assert_eq!(&buf[..n], &[0xde, 0xad, 0xbe, 0xef]);
 ```
 
-### `decode_to_array` — fixed-size decode
+### Decode into a fixed-size array
 
 ```rust
 use fast_hex_lite::decode_to_array;
@@ -68,7 +80,7 @@ let bytes: [u8; 4] = decode_to_array(b"deadbeef").unwrap();
 assert_eq!(bytes, [0xde, 0xad, 0xbe, 0xef]);
 ```
 
-### `encode_to_slice` — raw bytes → hex bytes
+### Encode bytes to hex
 
 ```rust
 use fast_hex_lite::encode_to_slice;
@@ -76,23 +88,23 @@ use fast_hex_lite::encode_to_slice;
 let src = [0xde, 0xad, 0xbe, 0xef];
 let mut out = [0u8; 8];
 
-// Lowercase
-let n = encode_to_slice(&src, &mut out, true).unwrap();
-assert_eq!(&out[..n], b"deadbeef");
+encode_to_slice(&src, &mut out, true).unwrap();   // lowercase
+assert_eq!(&out, b"deadbeef");
 
-// Uppercase
-encode_to_slice(&src, &mut out, false).unwrap();
-assert_eq!(&out[..8], b"DEADBEEF");
+encode_to_slice(&src, &mut out, false).unwrap();  // uppercase
+assert_eq!(&out, b"DEADBEEF");
 ```
 
-### Helper functions
+### Length helpers
 
 ```rust
 use fast_hex_lite::{decoded_len, encoded_len};
 
-assert_eq!(decoded_len(8).unwrap(), 4);   // 8 hex chars → 4 bytes
-assert_eq!(encoded_len(4), 8);            // 4 bytes → 8 hex chars
+assert_eq!(decoded_len(8).unwrap(), 4);  // 8 hex chars -> 4 bytes
+assert_eq!(encoded_len(4), 8);           // 4 bytes -> 8 hex chars
 ```
+
+---
 
 ## Error handling
 
@@ -101,81 +113,129 @@ use fast_hex_lite::{decode_to_slice, Error};
 
 let mut buf = [0u8; 4];
 
-// Odd length
+// Odd-length input
 assert_eq!(decode_to_slice(b"abc", &mut buf), Err(Error::OddLength));
 
 // Output buffer too small
 assert_eq!(decode_to_slice(b"deadbeef", &mut buf[..1]), Err(Error::OutputTooSmall));
 
-// Invalid character
+// Invalid character: exact byte index reported
 let err = decode_to_slice(b"deXd", &mut buf).unwrap_err();
 assert!(matches!(err, Error::InvalidByte { index: 2, byte: b'X' }));
 ```
 
+All errors include precise context. `InvalidByte` reports the zero-based index of the
+first invalid byte in the source slice.
+
+---
+
 ## SIMD acceleration
 
-Enable the `simd` feature for a SIMD-accelerated decoder (processes 32 hex bytes per loop
-iteration using `std::simd::u8x32`):
+Enable the `simd` feature to use a SIMD-accelerated decoder built on `std::simd`:
 
 ```toml
 fast-hex-lite = { version = "0.1", features = ["simd"] }
 ```
 
-The SIMD path is **fully transparent**: same public API, same error semantics including
-exact error-byte index reporting. A scalar fallback handles any remaining tail bytes.
+The SIMD path processes 32 hex bytes per iteration using `Simd<u8, 32>`. It is fully
+transparent: the public API, error types, and error index semantics are identical to the
+scalar path. Remaining tail bytes fall back to scalar automatically.
 
-Requirements:
-- Rust 1.88+ (stable portable SIMD)
-- Feature implies `std`
+Requirements: Rust 1.88+, stable (no nightly features used).
 
-## Running benchmarks
+---
 
-```bash
-# Scalar (default)
-cargo bench
+## Benchmarks
 
-# With SIMD
-cargo bench --features simd
-```
+Measured on Apple M3 Pro (macOS, `cargo bench --features simd`).
 
-### Sample results (placeholder — run on your machine)
+Numbers are median Criterion throughput values.
 
-| Benchmark                 | 256 B      | 4 KB       | 64 KB      | 1 MB       |
-|---------------------------|-----------|-----------|-----------|-----------|
-| decode fast-hex-lite      | ~200 MB/s | ~600 MB/s | ~700 MB/s | ~720 MB/s |
-| decode fast-hex-lite+simd | ~400 MB/s | ~1.2 GB/s | ~1.4 GB/s | ~1.5 GB/s |
-| decode hex-crate          | ~120 MB/s | ~200 MB/s | ~220 MB/s | ~225 MB/s |
-| encode fast-hex-lite      | ~800 MB/s | ~2 GB/s   | ~2.1 GB/s | ~2.1 GB/s |
-| encode hex-crate          | ~200 MB/s | ~400 MB/s | ~420 MB/s | ~430 MB/s |
+Throughput is over **decoded output bytes** for decode, **input bytes** for encode and
+validate, and **decoded output bytes** for decode_in_place.
 
-> _Numbers are illustrative. Run `cargo bench --features simd` for real figures._
+### Decode: scalar (hex to bytes)
 
-## `no_std` support
+| Input | fast-hex-lite lower | fast-hex-lite mixed | hex crate lower | hex crate mixed |
+|-------|:-------------------:|:-------------------:|:---------------:|:---------------:|
+| 32 B  | 1.67 GiB/s          | 1.66 GiB/s          | 663 MiB/s       | 696 MiB/s       |
+| 256 B | 1.57 GiB/s          | 1.58 GiB/s          | 636 MiB/s       | 700 MiB/s       |
+| 4 KB  | 1.70 GiB/s          | 1.70 GiB/s          | 597 MiB/s       | 621 MiB/s       |
+| 64 KB | 1.67 GiB/s          | 1.68 GiB/s          | 357 MiB/s       | 370 MiB/s       |
+| 1 MB  | 1.67 GiB/s          | 1.71 GiB/s          | 207 MiB/s       | 215 MiB/s       |
 
-The crate is `#![no_std]` by default. No heap allocator is needed either.
-All APIs work on caller-provided slices/arrays.
+### Decode: SIMD (hex to bytes)
+
+| Input | fast-hex-lite lower | fast-hex-lite mixed | hex crate lower | hex crate mixed |
+|-------|:-------------------:|:-------------------:|:---------------:|:---------------:|
+| 32 B  | 5.51 GiB/s          | 5.49 GiB/s          | 628 MiB/s       | 681 MiB/s       |
+| 256 B | 6.10 GiB/s          | 6.09 GiB/s          | 608 MiB/s       | 659 MiB/s       |
+| 4 KB  | 6.03 GiB/s          | 6.04 GiB/s          | 584 MiB/s       | 617 MiB/s       |
+| 64 KB | 6.14 GiB/s          | 6.15 GiB/s          | 390 MiB/s       | 391 MiB/s       |
+| 1 MB  | 6.09 GiB/s          | 6.15 GiB/s          | 201 MiB/s       | 202 MiB/s       |
+
+### Encode (bytes to hex)
+
+| Input | fast-hex-lite lower | fast-hex-lite upper | hex crate lower |
+|-------|:-------------------:|:-------------------:|:---------------:|
+| 32 B  | 2.50 GiB/s          | 2.20 GiB/s          | 2.03 GiB/s      |
+| 256 B | 2.50 GiB/s          | 2.48 GiB/s          | 2.01 GiB/s      |
+| 4 KB  | 2.61 GiB/s          | 2.59 GiB/s          | 2.06 GiB/s      |
+| 64 KB | 2.60 GiB/s          | 2.60 GiB/s          | 2.09 GiB/s      |
+| 1 MB  | 2.59 GiB/s          | 2.59 GiB/s          | 2.09 GiB/s      |
+
+### decode_in_place
+
+| Input | scalar     | simd       |
+|-------|:----------:|:----------:|
+| 32 B  | 655 MiB/s  | 650 MiB/s  |
+| 256 B | 717 MiB/s  | 709 MiB/s  |
+| 4 KB  | 764 MiB/s  | 775 MiB/s  |
+| 64 KB | 765 MiB/s  | 770 MiB/s  |
+| 1 MB  | 780 MiB/s  | 785 MiB/s  |
+
+Mixed-case input carries zero overhead versus lowercase. Decode throughput is stable
+across all input sizes. The SIMD path delivers ~3.5-3.7x uplift over scalar for decode
+at large inputs.
+
+---
+
+## no_std support
+
+The crate is `#![no_std]` by default. No allocator is required. All APIs work on
+caller-provided stack arrays or static buffers.
 
 ```toml
-# In your no_std crate:
-[dependencies]
 fast-hex-lite = { version = "0.1", default-features = false }
 ```
 
-## Codebase overview
+---
+
+## Code structure
 
 ```
 src/
-  lib.rs      — public API, Error type, feature gates
-  decode.rs   — scalar decoder + unhex LUT + in-place decode
-  encode.rs   — scalar encoder
-  simd.rs     — SIMD decoder (compiled only with feature `simd`)
+  lib.rs      -- public API, Error type, feature gates
+  decode.rs   -- scalar decoder, 256-entry compile-time LUT, in-place decode
+  encode.rs   -- scalar encoder
+  simd.rs     -- SIMD decoder (compiled only with feature `simd`)
 benches/
-  bench.rs    — Criterion benchmarks vs `hex` crate
+  bench.rs    -- Criterion benchmarks vs hex crate
 ```
+
+---
 
 ## MSRV
 
-Rust **1.88** (edition 2021). Stable only — no nightly features required.
+Rust 1.88, edition 2021. Stable only, no nightly features required.
+
+---
 
 ## License
-- [Apache License, Version 2.0](LICENSE)
+
+Licensed under either of
+
+- [MIT License](LICENSE-MIT)
+- [Apache License, Version 2.0](LICENSE-APACHE)
+
+at your option.
